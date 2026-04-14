@@ -1,0 +1,42 @@
+[package]
+name    = "deploy-launcher"
+version = "1.0.0"
+edition = "2021"
+
+[profile.release]
+panic         = "abort"
+codegen-units = 1
+lto           = true
+opt-level     = "s"
+strip         = true
+
+[lib]
+name       = "deploy_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "deploy-launcher"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri                 = { version = "2", features = [] }
+tauri-plugin-shell    = { version = "2" }
+tauri-plugin-http     = { version = "2" }
+tauri-plugin-os       = { version = "2" }
+tauri-plugin-updater  = { version = "2" }  # Phase 7 — launcher self-update
+tauri-plugin-process  = { version = "2" }  # Phase 7 — relaunch after update
+tauri-plugin-fs = { version = "2" }
+
+serde        = { version = "1",    features = ["derive"] }
+serde_json   = "1"
+tokio        = { version = "1",    features = ["full"] }
+reqwest      = { version = "0.12", features = ["json", "stream"] }
+zip          = "2"
+dirs         = "5"
+futures-util = "0.3"
+anyhow       = "1"
+hostname     = "0.3"
+mac_address  = "1.1"

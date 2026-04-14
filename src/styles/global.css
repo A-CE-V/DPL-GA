@@ -1,0 +1,44 @@
+/* Local fonts — place woff2 files in public/fonts/ (same files as dashboard) */
+@font-face { font-family:"DM Mono"; src:url("/fonts/dm-mono-400.woff2") format("woff2"); font-weight:400; font-display:swap; }
+@font-face { font-family:"DM Mono"; src:url("/fonts/dm-mono-500.woff2") format("woff2"); font-weight:500; font-display:swap; }
+@font-face { font-family:"Syne";    src:url("/fonts/syne-700.woff2")    format("woff2"); font-weight:700; font-display:swap; }
+@font-face { font-family:"Syne";    src:url("/fonts/syne-900.woff2")    format("woff2"); font-weight:900; font-display:swap; }
+
+:root {
+  --bg-base:     #040704;
+  --bg-surface:  #080d08;
+  --bg-elevated: #0c130c;
+  --accent-0:    #052010;
+  --accent-1:    #0d3d1e;
+  --accent:      #22c55e;
+  --accent-3:    #86efac;
+  --glow:        #22c55e;
+  --border:      #111f11;
+  --border-2:    #1a2e1a;
+  --text-primary:   #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted:     #475569;
+  --text-faint:     #2d3d2d;
+  /* Launcher is a fixed 900×600 window — use fixed px sizes, not clamp */
+  --sidebar-w: 220px;
+  --topbar-h:  48px;
+}
+
+*, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
+html, body, #root { height:100%; overflow:hidden; background:var(--bg-base); }
+body {
+  font-family:"DM Mono","Courier New",monospace;
+  font-size:13px; color:var(--text-primary);
+  -webkit-font-smoothing:antialiased;
+  user-select:none;
+}
+
+::-webkit-scrollbar       { width:3px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--border-2); border-radius:2px; }
+
+@keyframes spin       { to { transform:rotate(360deg); } }
+@keyframes fadeIn     { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+@keyframes fadeInScale { from { opacity:0; transform:scale(0.94); filter:blur(10px); } to { opacity:1; transform:scale(1); filter:blur(0); } }
+@keyframes pulse-glow { 0%,100% { box-shadow:0 0 18px rgba(34,197,94,.1); } 50% { box-shadow:0 0 36px rgba(34,197,94,.25); } }
+@keyframes shimmer    { to { transform:translateX(200%); } }
