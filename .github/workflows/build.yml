@@ -124,21 +124,31 @@ jobs:
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2
 
-      # ── 9. Build macOS universal binary (Intel + Apple Silicon) ───────────
+      # ── 9. Install zip (Windows only) ─────────────────────────────────────
+      - name: Install zip (Windows)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: choco install zip -y
+
+      # ── 10. Build macOS universal binary (Intel + Apple Silicon) ──────────
       - name: Build (macOS universal)
         if: matrix.platform == 'macos'
         run: npm run tauri build -- --target universal-apple-darwin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      # ── 10. Build (Windows / Linux) ────────────────────────────────────────
+      # ── 11. Build (Windows / Linux) ────────────────────────────────────────
       - name: Build
         if: matrix.platform != 'macos'
         run: npm run tauri build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      # ── 11. Find the built artifact ────────────────────────────────────────
+      # ── 12. Find the built artifact ────────────────────────────────────────
       - name: Find artifact
         id: find_artifact
         shell: bash
@@ -160,7 +170,7 @@ jobs:
           echo "artifact_name=$(basename $ARTIFACT)" >> $GITHUB_OUTPUT
           echo "Found: $ARTIFACT"
 
-      # ── 12. ZIP the artifact ───────────────────────────────────────────────
+      # ── 13. ZIP the artifact ───────────────────────────────────────────────
       - name: ZIP artifact
         shell: bash
         run: |
@@ -179,7 +189,7 @@ jobs:
           echo "zip_size=$SIZE" >> $GITHUB_ENV
           echo "ZIP created: $ZIP_NAME ($SIZE bytes)"
 
-      # ── 13. Upload ZIP to Cloudflare R2 via Worker ────────────────────────
+      # ── 14. Upload ZIP to Cloudflare R2 via Worker ────────────────────────
       - name: Upload to R2
         shell: bash
         run: |
@@ -202,7 +212,7 @@ jobs:
 
           echo "Upload successful!"
 
-      # ── 14. Notify Worker of completion (success) ─────────────────────────
+      # ── 15. Notify Worker of completion (success) ─────────────────────────
       - name: Notify Worker — success
         if: success()
         shell: bash
@@ -217,7 +227,7 @@ jobs:
             }' \
             "${{ secrets.WORKER_URL }}/internal/build-complete"
 
-      # ── 15. Notify Worker of completion (failure) ─────────────────────────
+      # ── 16. Notify Worker of completion (failure) ─────────────────────────
       - name: Notify Worker — failure
         if: failure()
         shell: bash
