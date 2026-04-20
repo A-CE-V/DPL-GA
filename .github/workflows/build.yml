@@ -37,8 +37,6 @@ jobs:
         uses: actions/checkout@v4
 
       # ── 2. Linux dependencies ────────────────────────────────────────────────
-      # NOTE: No libayatana / libappindicator needed — Cargo.toml has no tray feature.
-      # Using ubuntu-22.04 runner avoids the Noble/ayatana conflict entirely.
       - name: Install Linux dependencies
         if: matrix.platform == 'linux'
         run: |
@@ -100,19 +98,46 @@ jobs:
         run: npm install -g @tauri-apps/cli@^2
 
       # ── 9. Build ─────────────────────────────────────────────────────────────
-      # macOS: native arch only (no universal — simpler and more reliable in CI)
-      # Windows/Linux: standard build
       - name: Build
-        shell: bash
         run: npm run tauri build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 10. Find artifact ────────────────────────────────────────────────────
-      # Uses recursive find — works regardless of exact Tauri output path.
-      # Prints tree first so any failure is immediately diagnosable.
-      - name: Find artifact
-        id: find_artifact
+      # ── 10. Find artifact + ZIP (Windows) ────────────────────────────────────
+      # FIX: zip command does not exist on Windows runners.
+      # Use PowerShell Compress-Archive instead.
+      - name: Find and ZIP artifact (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Write-Host "=== Bundle tree ==="
+          Get-ChildItem -Recurse "src-tauri\target\release\bundle" -ErrorAction SilentlyContinue | Select-Object FullName
+
+          # Find NSIS installer first, fall back to MSI
+          $artifact = Get-ChildItem -Recurse "src-tauri\target\release\bundle\nsis" -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $artifact) {
+            $artifact = Get-ChildItem -Recurse "src-tauri\target\release\bundle\msi" -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+
+          if (-not $artifact) {
+            Write-Error "ERROR: No artifact found for Windows"
+            exit 1
+          }
+
+          Write-Host "Found: $($artifact.FullName)"
+
+          $zipName = "launcher-${{ github.event.inputs.game_id }}-windows.zip"
+          Compress-Archive -Path $artifact.FullName -DestinationPath $zipName -Force
+
+          $size = (Get-Item $zipName).Length
+          Write-Host "ZIP: $zipName ($size bytes)"
+
+          # Set env for next steps
+          "zip_path=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # ── 11. Find artifact + ZIP (macOS / Linux) ───────────────────────────────
+      - name: Find and ZIP artifact (Unix)
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
           echo "=== Bundle tree ==="
@@ -121,17 +146,10 @@ jobs:
 
           ARTIFACT=""
 
-          if [ "${{ matrix.platform }}" = "windows" ]; then
-            # Prefer NSIS installer, fall back to MSI
-            ARTIFACT=$(find src-tauri/target -path "*/bundle/nsis/*.exe" -type f 2>/dev/null | head -1)
-            if [ -z "$ARTIFACT" ]; then
-              ARTIFACT=$(find src-tauri/target -path "*/bundle/msi/*.msi" -type f 2>/dev/null | head -1)
-            fi
-
-          elif [ "${{ matrix.platform }}" = "macos" ]; then
+          if [ "${{ matrix.platform }}" = "macos" ]; then
             ARTIFACT=$(find src-tauri/target -path "*/bundle/dmg/*.dmg" -type f 2>/dev/null | head -1)
             if [ -z "$ARTIFACT" ]; then
-              ARTIFACT=$(find src-tauri/target -path "*/bundle/macos/*.app" -maxdepth 8 -type d 2>/dev/null | head -1)
+              ARTIFACT=$(find src-tauri/target -path "*/bundle/macos/*.app" -type d 2>/dev/null | head -1)
             fi
 
           elif [ "${{ matrix.platform }}" = "linux" ]; then
@@ -147,45 +165,75 @@ jobs:
           fi
 
           echo "Found: $ARTIFACT"
-          echo "artifact_path=$ARTIFACT" >> $GITHUB_OUTPUT
-          echo "artifact_name=$(basename $ARTIFACT)" >> $GITHUB_OUTPUT
 
-      # ── 11. ZIP artifact ─────────────────────────────────────────────────────
-      - name: ZIP artifact
-        shell: bash
-        run: |
-          ARTIFACT="${{ steps.find_artifact.outputs.artifact_path }}"
           ZIP_NAME="launcher-${{ github.event.inputs.game_id }}-${{ matrix.platform }}.zip"
 
           if [ "${{ matrix.platform }}" = "linux" ]; then
             chmod +x "$ARTIFACT"
           fi
 
-          # .app bundles are directories — zip the whole folder
           if [[ "$ARTIFACT" == *.app ]]; then
             zip -r "$ZIP_NAME" "$ARTIFACT"
           else
             zip -j "$ZIP_NAME" "$ARTIFACT"
           fi
 
-          SIZE=$(stat -f%z "$ZIP_NAME" 2>/dev/null || stat -c%s "$ZIP_NAME")
-          echo "zip_path=$ZIP_NAME" >> $GITHUB_ENV
+          SIZE=$(wc -c < "$ZIP_NAME")
           echo "ZIP: $ZIP_NAME ($SIZE bytes)"
+          echo "zip_path=$ZIP_NAME" >> $GITHUB_ENV
 
-      # ── 12. Upload to R2 ─────────────────────────────────────────────────────
-      - name: Upload to R2
+      # ── 12. Upload to R2 (Windows) ────────────────────────────────────────────
+      # FIX: head -n -1 is Linux-only. On Windows we use PowerShell + curl.
+      - name: Upload to R2 (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $zipPath = "${{ env.zip_path }}"
+          $gameId  = "${{ github.event.inputs.game_id }}"
+          $secret  = "${{ secrets.WORKER_SECRET }}"
+          $url     = "${{ secrets.WORKER_URL }}/upload/windows"
+
+          $response = curl.exe -s -o response_body.txt -w "%{http_code}" `
+            -X POST `
+            -H "X-Worker-Secret: $secret" `
+            -F "game_id=$gameId" `
+            -F "file=@$zipPath;type=application/zip" `
+            $url
+
+          $body = Get-Content response_body.txt -Raw
+          Write-Host "Worker response ($response): $body"
+
+          if ($response -ne "201") {
+            Write-Error "ERROR: Upload failed with HTTP $response"
+            exit 1
+          }
+
+          Write-Host "Upload successful!"
+
+      # ── 13. Upload to R2 (Unix) ───────────────────────────────────────────────
+      # FIX: use a temp file for the body instead of head -n -1
+      # head -n -1 is GNU-only and fails on macOS's BSD head.
+      - name: Upload to R2 (Unix)
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
-          RESPONSE=$(curl -s -w "\n%{http_code}" \
+          ZIP_PATH="${{ env.zip_path }}"
+          GAME_ID="${{ github.event.inputs.game_id }}"
+          PLATFORM="${{ matrix.platform }}"
+          SECRET="${{ secrets.WORKER_SECRET }}"
+          WORKER_URL="${{ secrets.WORKER_URL }}"
+
+          # Write body to file, capture HTTP code separately — avoids head -n -1
+          HTTP_CODE=$(curl -s \
+            -o response_body.txt \
+            -w "%{http_code}" \
             -X POST \
-            -H "X-Worker-Secret: ${{ secrets.WORKER_SECRET }}" \
-            -F "game_id=${{ github.event.inputs.game_id }}" \
-            -F "file=@${{ env.zip_path }};type=application/zip" \
-            "${{ secrets.WORKER_URL }}/upload/${{ matrix.platform }}")
+            -H "X-Worker-Secret: $SECRET" \
+            -F "game_id=$GAME_ID" \
+            -F "file=@$ZIP_PATH;type=application/zip" \
+            "$WORKER_URL/upload/$PLATFORM")
 
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-
+          BODY=$(cat response_body.txt)
           echo "Worker response ($HTTP_CODE): $BODY"
 
           if [ "$HTTP_CODE" != "201" ]; then
@@ -195,7 +243,7 @@ jobs:
 
           echo "Upload successful!"
 
-      # ── 13. Notify Worker — success ───────────────────────────────────────────
+      # ── 14. Notify Worker — success ───────────────────────────────────────────
       - name: Notify Worker — success
         if: success()
         shell: bash
@@ -206,7 +254,7 @@ jobs:
             -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"platform\":\"${{ matrix.platform }}\",\"status\":\"success\"}" \
             "${{ secrets.WORKER_URL }}/internal/build-complete"
 
-      # ── 14. Notify Worker — failure ───────────────────────────────────────────
+      # ── 15. Notify Worker — failure ───────────────────────────────────────────
       - name: Notify Worker — failure
         if: failure()
         shell: bash
