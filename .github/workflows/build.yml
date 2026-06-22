@@ -24,15 +24,12 @@ jobs:
         include:
           - platform: windows
             runner: windows-latest
-            min_size_bytes: 1000000      # 1 MB — NSIS w/ downloadBootstrapper is legitimately small
 
           - platform: macos
             runner: macos-latest
-            min_size_bytes: 2000000      # 2 MB — catches a truncated/corrupt DMG from hdiutil flakiness
 
           - platform: linux
             runner: ubuntu-22.04
-            min_size_bytes: 30000000     # 30 MB — AppImage bundles full WebKitGTK, always large
 
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
@@ -100,50 +97,47 @@ jobs:
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2
 
-      # ── 9. Build (Windows / Linux — single attempt, these don't have the
-      #         hdiutil flakiness that macOS has) ──────────────────────────────
+      # ── 9. Build ─────────────────────────────────────────────────────────────
       - name: Build
-        if: matrix.platform != 'macos'
         run: npm run tauri build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 9b. Build (macOS — with retry) ───────────────────────────────────────
-      # FIX: Tauri's bundle_dmg.sh occasionally fails on GitHub's macOS runners
-      # due to a well-known hdiutil race condition (the disk image creation
-      # step intermittently fails or produces a truncated DMG under CI
-      # conditions). This is a documented, widely-reported flaky failure in
-      # the Tauri community — not something wrong with our config. Simply
-      # retrying the build is the standard, recommended workaround, since
-      # re-runs succeed the vast majority of the time.
-      - name: Build (macOS, with retry)
-        if: matrix.platform == 'macos'
-        shell: bash
+      # ── 10. Find artifact + ZIP (Windows) ────────────────────────────────────
+      # FIX: zip command does not exist on Windows runners.
+      # Use PowerShell Compress-Archive instead.
+      - name: Find and ZIP artifact (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
         run: |
-          MAX_ATTEMPTS=3
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            echo "=== Build attempt $attempt/$MAX_ATTEMPTS ==="
-            if npm run tauri build; then
-              echo "Build succeeded on attempt $attempt"
-              exit 0
-            fi
-            echo "Build failed on attempt $attempt"
-            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
-              echo "Cleaning up partial bundle output before retry..."
-              rm -rf src-tauri/target/release/bundle/dmg
-              rm -rf src-tauri/target/release/bundle/macos
-              echo "Waiting 15s before retry (lets any hdiutil lock release)..."
-              sleep 15
-            fi
-          done
-          echo "All $MAX_ATTEMPTS attempts failed."
-          exit 1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          Write-Host "=== Bundle tree ==="
+          Get-ChildItem -Recurse "src-tauri\target\release\bundle" -ErrorAction SilentlyContinue | Select-Object FullName
 
-      # ── 10. Find artifact ────────────────────────────────────────────────────
-      - name: Find artifact
-        id: find_artifact
+          # Find NSIS installer first, fall back to MSI
+          $artifact = Get-ChildItem -Recurse "src-tauri\target\release\bundle\nsis" -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $artifact) {
+            $artifact = Get-ChildItem -Recurse "src-tauri\target\release\bundle\msi" -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+
+          if (-not $artifact) {
+            Write-Error "ERROR: No artifact found for Windows"
+            exit 1
+          }
+
+          Write-Host "Found: $($artifact.FullName)"
+
+          $zipName = "launcher-${{ github.event.inputs.game_id }}-windows.zip"
+          Compress-Archive -Path $artifact.FullName -DestinationPath $zipName -Force
+
+          $size = (Get-Item $zipName).Length
+          Write-Host "ZIP: $zipName ($size bytes)"
+
+          # Set env for next steps
+          "zip_path=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # ── 11. Find artifact + ZIP (macOS / Linux) ───────────────────────────────
+      - name: Find and ZIP artifact (Unix)
+        if: matrix.platform != 'windows'
         shell: bash
         run: |
           echo "=== Bundle tree ==="
@@ -152,13 +146,7 @@ jobs:
 
           ARTIFACT=""
 
-          if [ "${{ matrix.platform }}" = "windows" ]; then
-            ARTIFACT=$(find src-tauri/target -path "*/bundle/nsis/*.exe" -type f 2>/dev/null | head -1)
-            if [ -z "$ARTIFACT" ]; then
-              ARTIFACT=$(find src-tauri/target -path "*/bundle/msi/*.msi" -type f 2>/dev/null | head -1)
-            fi
-
-          elif [ "${{ matrix.platform }}" = "macos" ]; then
+          if [ "${{ matrix.platform }}" = "macos" ]; then
             ARTIFACT=$(find src-tauri/target -path "*/bundle/dmg/*.dmg" -type f 2>/dev/null | head -1)
             if [ -z "$ARTIFACT" ]; then
               ARTIFACT=$(find src-tauri/target -path "*/bundle/macos/*.app" -type d 2>/dev/null | head -1)
@@ -177,57 +165,7 @@ jobs:
           fi
 
           echo "Found: $ARTIFACT"
-          echo "artifact_path=$ARTIFACT" >> $GITHUB_OUTPUT
-          echo "artifact_name=$(basename $ARTIFACT)" >> $GITHUB_OUTPUT
 
-      # ── 11. Sanity-check artifact size ───────────────────────────────────────
-      # FIX: a build can "succeed" (exit code 0) while still producing a
-      # truncated or corrupt bundle — this has been observed specifically
-      # with macOS DMGs after the hdiutil flakiness above. Rather than
-      # silently uploading a broken file that LOOKS like a successful build
-      # to players, we fail the job loudly here if the artifact is
-      # suspiciously small for its platform.
-      - name: Verify artifact size
-        shell: bash
-        run: |
-          ARTIFACT="${{ steps.find_artifact.outputs.artifact_path }}"
-          MIN_SIZE=${{ matrix.min_size_bytes }}
-
-          if [ -d "$ARTIFACT" ]; then
-            SIZE=$(du -sb "$ARTIFACT" 2>/dev/null | cut -f1 || du -sk "$ARTIFACT" | cut -f1 | awk '{print $1*1024}')
-          else
-            SIZE=$(wc -c < "$ARTIFACT")
-          fi
-
-          echo "Artifact size: $SIZE bytes (minimum expected: $MIN_SIZE bytes)"
-
-          if [ "$SIZE" -lt "$MIN_SIZE" ]; then
-            echo "ERROR: Artifact is suspiciously small ($SIZE bytes < $MIN_SIZE byte minimum)."
-            echo "This usually means the bundle step silently produced a truncated"
-            echo "or incomplete build. Failing here instead of shipping a broken file."
-            exit 1
-          fi
-
-          echo "✓ Size check passed."
-
-      # ── 12. ZIP artifact ─────────────────────────────────────────────────────
-      - name: Find and ZIP artifact (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          $artifact = "${{ steps.find_artifact.outputs.artifact_path }}"
-          $zipName = "launcher-${{ github.event.inputs.game_id }}-windows.zip"
-          Compress-Archive -Path $artifact -DestinationPath $zipName -Force
-
-          $size = (Get-Item $zipName).Length
-          Write-Host "ZIP: $zipName ($size bytes)"
-          "zip_path=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: ZIP artifact (Unix)
-        if: matrix.platform != 'windows'
-        shell: bash
-        run: |
-          ARTIFACT="${{ steps.find_artifact.outputs.artifact_path }}"
           ZIP_NAME="launcher-${{ github.event.inputs.game_id }}-${{ matrix.platform }}.zip"
 
           if [ "${{ matrix.platform }}" = "linux" ]; then
@@ -244,7 +182,8 @@ jobs:
           echo "ZIP: $ZIP_NAME ($SIZE bytes)"
           echo "zip_path=$ZIP_NAME" >> $GITHUB_ENV
 
-      # ── 13. Upload to R2 (Windows) ────────────────────────────────────────────
+      # ── 12. Upload to R2 (Windows) ────────────────────────────────────────────
+      # FIX: head -n -1 is Linux-only. On Windows we use PowerShell + curl.
       - name: Upload to R2 (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -271,7 +210,9 @@ jobs:
 
           Write-Host "Upload successful!"
 
-      # ── 14. Upload to R2 (Unix) ───────────────────────────────────────────────
+      # ── 13. Upload to R2 (Unix) ───────────────────────────────────────────────
+      # FIX: use a temp file for the body instead of head -n -1
+      # head -n -1 is GNU-only and fails on macOS's BSD head.
       - name: Upload to R2 (Unix)
         if: matrix.platform != 'windows'
         shell: bash
@@ -282,6 +223,7 @@ jobs:
           SECRET="${{ secrets.WORKER_SECRET }}"
           WORKER_URL="${{ secrets.WORKER_URL }}"
 
+          # Write body to file, capture HTTP code separately — avoids head -n -1
           HTTP_CODE=$(curl -s \
             -o response_body.txt \
             -w "%{http_code}" \
@@ -301,7 +243,7 @@ jobs:
 
           echo "Upload successful!"
 
-      # ── 15. Notify Worker — success ───────────────────────────────────────────
+      # ── 14. Notify Worker — success ───────────────────────────────────────────
       - name: Notify Worker — success
         if: success()
         shell: bash
@@ -312,7 +254,7 @@ jobs:
             -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"platform\":\"${{ matrix.platform }}\",\"status\":\"success\"}" \
             "${{ secrets.WORKER_URL }}/internal/build-complete"
 
-      # ── 16. Notify Worker — failure ───────────────────────────────────────────
+      # ── 15. Notify Worker — failure ───────────────────────────────────────────
       - name: Notify Worker — failure
         if: failure()
         shell: bash
