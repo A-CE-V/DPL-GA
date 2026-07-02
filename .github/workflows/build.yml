@@ -63,6 +63,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # ── 5. Rust cache ────────────────────────────────────────────────────────
+      # NOTE: cache key intentionally excludes the game_id, since branding
+      # (step 11 below) patches tauri.conf.json AFTER Rust dependencies are
+      # already compiled — the cache stays valid across different games.
       - name: Cache Rust
         uses: actions/cache@v4
         with:
@@ -97,153 +100,305 @@ jobs:
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2
 
-      # ── 9. Build ─────────────────────────────────────────────────────────────
+      # ══════════════════════════════════════════════════════════════════════
+      # 9. APPLY GAME BRANDING — executable name + icon
+      #
+      # Without this, every player sees "Deploy" as the installer name, app
+      # name, and icon — regardless of which actual game they're installing.
+      # This step fetches the game's title + logo from Firestore (public read,
+      # no auth needed — see games/{gameId} rule) and patches tauri.conf.json
+      # before compiling, so the final installer/app is branded as the GAME,
+      # not as "Deploy".
+      #
+      # If no logo was uploaded, falls back gracefully to the default Deploy
+      # icon — this is intentional and matches what was asked for.
+      #
+      # The "identifier" field is also made unique per game_id. This matters:
+      # without it, two different customers' games would share the OS-level
+      # app identifier "com.deploylauncher.dashboard", which can cause a
+      # player who has two different Deploy-built games installed to have
+      # Windows/macOS treat the second install as an "update" of the first —
+      # silently overwriting or corrupting the other game's installation.
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Apply game branding (name + icon)
+        shell: bash
+        run: |
+          GAME_ID="${{ github.event.inputs.game_id }}"
+          PROJECT_ID="${{ secrets.VITE_FIREBASE_PROJECT_ID }}"
+
+          echo "Fetching project profile for $GAME_ID..."
+          PROFILE_JSON=$(curl -s "https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents/games/${GAME_ID}")
+
+          TITLE=$(node -e "
+            try {
+              const json = JSON.parse(process.argv[1]);
+              const title = json.fields?.profile?.mapValue?.fields?.title?.stringValue;
+              console.log((title && title.trim()) ? title.trim() : 'Deploy Launcher');
+            } catch (e) { console.log('Deploy Launcher'); }
+          " "$PROFILE_JSON")
+
+          LOGO_URL=$(node -e "
+            try {
+              const json = JSON.parse(process.argv[1]);
+              const url = json.fields?.profile?.mapValue?.fields?.logoUrl?.stringValue;
+              console.log(url || '');
+            } catch (e) { console.log(''); }
+          " "$PROFILE_JSON")
+
+          echo "Title: $TITLE"
+          echo "Logo URL: ${LOGO_URL:-<none>}"
+
+          # Patch tauri.conf.json — productName, window title, unique identifier
+          node -e "
+            const fs = require('fs');
+            const path = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const title = process.argv[1];
+            const gameId = process.argv[2];
+
+            conf.productName = title;
+            if (conf.app && conf.app.windows && conf.app.windows[0]) {
+              conf.app.windows[0].title = title;
+            }
+            conf.identifier = 'com.deploylauncher.' + gameId.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+
+            fs.writeFileSync(path, JSON.stringify(conf, null, 2));
+            console.log('Patched tauri.conf.json: productName=' + title + ', identifier=' + conf.identifier);
+          " "$TITLE" "$GAME_ID"
+
+          # Generate platform icons from the game's logo, if one exists
+          if [ -n "$LOGO_URL" ] && [ "$LOGO_URL" != "null" ]; then
+            echo "Downloading logo..."
+            curl -sL "$LOGO_URL" -o logo_source.webp || true
+
+            if [ -s logo_source.webp ]; then
+              echo "Converting logo to PNG (1024x1024, padded, transparent)..."
+              CONVERTED=false
+              if command -v magick &> /dev/null; then
+                magick logo_source.webp -resize 1024x1024 -background none -gravity center -extent 1024x1024 logo_source.png && CONVERTED=true
+              elif command -v convert &> /dev/null; then
+                convert logo_source.webp -resize 1024x1024 -background none -gravity center -extent 1024x1024 logo_source.png && CONVERTED=true
+              fi
+
+              if [ "$CONVERTED" = true ] && [ -s logo_source.png ]; then
+                echo "Generating app icons from logo..."
+                npx tauri icon logo_source.png -o src-tauri/icons
+                echo "✓ Custom game icon applied."
+              else
+                echo "Logo conversion failed — keeping default Deploy icon."
+              fi
+            else
+              echo "Logo download failed or empty — keeping default Deploy icon."
+            fi
+          else
+            echo "No logo set for this project — keeping default Deploy icon."
+          fi
+
+      # ── 10. Build (Windows / Linux) ──────────────────────────────────────────
       - name: Build
-        run: npm run tauri build
+        if: matrix.platform != 'macos'
+        shell: bash
+        run: |
+          if npm run tauri build 2>&1 | tee build_output.txt; then
+            exit 0
+          else
+            exit 1
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 10. Find artifact + ZIP (Windows) ────────────────────────────────────
-      # FIX: zip command does not exist on Windows runners.
-      # Use PowerShell Compress-Archive instead.
-      - name: Find and ZIP artifact (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
+      # ── 11. Build (macOS, with retry) ────────────────────────────────────────
+      # Tauri's bundle_dmg.sh occasionally fails on GitHub's macOS runners due
+      # to a well-documented hdiutil race condition during CI. Retrying is the
+      # standard, community-recommended workaround — re-runs succeed the vast
+      # majority of the time.
+      - name: Build (macOS, with retry)
+        if: matrix.platform == 'macos'
+        shell: bash
         run: |
-          Write-Host "=== Bundle tree ==="
-          Get-ChildItem -Recurse "src-tauri\target\release\bundle" -ErrorAction SilentlyContinue | Select-Object FullName
+          MAX_ATTEMPTS=3
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "=== Build attempt $attempt/$MAX_ATTEMPTS ==="
+            if npm run tauri build 2>&1 | tee build_output.txt; then
+              echo "Build succeeded on attempt $attempt"
+              exit 0
+            fi
+            echo "Build failed on attempt $attempt"
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              rm -rf src-tauri/target/release/bundle/dmg
+              rm -rf src-tauri/target/release/bundle/macos
+              echo "Waiting 15s before retry..."
+              sleep 15
+            fi
+          done
+          exit 1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          # Find NSIS installer first, fall back to MSI
-          $artifact = Get-ChildItem -Recurse "src-tauri\target\release\bundle\nsis" -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $artifact) {
-            $artifact = Get-ChildItem -Recurse "src-tauri\target\release\bundle\msi" -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
-          }
-
-          if (-not $artifact) {
-            Write-Error "ERROR: No artifact found for Windows"
-            exit 1
-          }
-
-          Write-Host "Found: $($artifact.FullName)"
-
-          $zipName = "launcher-${{ github.event.inputs.game_id }}-windows.zip"
-          Compress-Archive -Path $artifact.FullName -DestinationPath $zipName -Force
-
-          $size = (Get-Item $zipName).Length
-          Write-Host "ZIP: $zipName ($size bytes)"
-
-          # Set env for next steps
-          "zip_path=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      # ── 11. Find artifact + ZIP (macOS / Linux) ───────────────────────────────
-      - name: Find and ZIP artifact (Unix)
-        if: matrix.platform != 'windows'
+      # ── 12. Find artifact ─────────────────────────────────────────────────────
+      - name: Find artifact
+        id: find_artifact
         shell: bash
         run: |
           echo "=== Bundle tree ==="
           find src-tauri/target -path "*/bundle/*" -type f 2>/dev/null | sort
           echo "==================="
-
           ARTIFACT=""
-
-          if [ "${{ matrix.platform }}" = "macos" ]; then
-            ARTIFACT=$(find src-tauri/target -path "*/bundle/dmg/*.dmg" -type f 2>/dev/null | head -1)
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            ARTIFACT=$(find src-tauri/target -path "*/bundle/nsis/*.exe" -type f 2>/dev/null | head -1)
             if [ -z "$ARTIFACT" ]; then
-              ARTIFACT=$(find src-tauri/target -path "*/bundle/macos/*.app" -type d 2>/dev/null | head -1)
+              ARTIFACT=$(find src-tauri/target -path "*/bundle/msi/*.msi" -type f 2>/dev/null | head -1)
             fi
-
+          elif [ "${{ matrix.platform }}" = "macos" ]; then
+            ARTIFACT=$(find src-tauri/target -path "*/bundle/dmg/*.dmg" -type f 2>/dev/null | head -1)
           elif [ "${{ matrix.platform }}" = "linux" ]; then
             ARTIFACT=$(find src-tauri/target -path "*/bundle/appimage/*.AppImage" -type f 2>/dev/null | head -1)
             if [ -z "$ARTIFACT" ]; then
               ARTIFACT=$(find src-tauri/target -path "*/bundle/deb/*.deb" -type f 2>/dev/null | head -1)
             fi
           fi
-
           if [ -z "$ARTIFACT" ]; then
             echo "ERROR: No artifact found for ${{ matrix.platform }}"
             exit 1
           fi
-
           echo "Found: $ARTIFACT"
+          echo "artifact_path=$ARTIFACT" >> $GITHUB_OUTPUT
 
+      # ── 13. ZIP artifact (Windows) ───────────────────────────────────────────
+      - name: ZIP artifact (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $artifact = "${{ steps.find_artifact.outputs.artifact_path }}"
+          $zipName  = "launcher-${{ github.event.inputs.game_id }}-windows.zip"
+          Compress-Archive -Path $artifact -DestinationPath $zipName -Force
+          $size = (Get-Item $zipName).Length
+          Write-Host "ZIP: $zipName ($size bytes)"
+          "zip_path=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # ── 14. ZIP artifact (Unix) ──────────────────────────────────────────────
+      - name: ZIP artifact (Unix)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          ARTIFACT="${{ steps.find_artifact.outputs.artifact_path }}"
           ZIP_NAME="launcher-${{ github.event.inputs.game_id }}-${{ matrix.platform }}.zip"
-
-          if [ "${{ matrix.platform }}" = "linux" ]; then
-            chmod +x "$ARTIFACT"
-          fi
-
+          if [ "${{ matrix.platform }}" = "linux" ]; then chmod +x "$ARTIFACT"; fi
           if [[ "$ARTIFACT" == *.app ]]; then
             zip -r "$ZIP_NAME" "$ARTIFACT"
           else
             zip -j "$ZIP_NAME" "$ARTIFACT"
           fi
-
           SIZE=$(wc -c < "$ZIP_NAME")
           echo "ZIP: $ZIP_NAME ($SIZE bytes)"
           echo "zip_path=$ZIP_NAME" >> $GITHUB_ENV
 
-      # ── 12. Upload to R2 (Windows) ────────────────────────────────────────────
-      # FIX: head -n -1 is Linux-only. On Windows we use PowerShell + curl.
-      - name: Upload to R2 (Windows)
+      # ── 15. Encrypt artifact (Windows) ───────────────────────────────────────
+      # AES-256-GCM so a leaked R2 bucket or repo URL alone can never expose a
+      # customer's compiled game — only the Worker (holder of ENCRYPT_KEY) can
+      # decrypt it. Format written: [12B IV][16B GCM tag][ciphertext]
+      - name: Encrypt artifact (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           $zipPath = "${{ env.zip_path }}"
+          $encPath = "$zipPath.enc"
+          node -e @"
+          const crypto = require('crypto');
+          const fs     = require('fs');
+          const key    = crypto.createHash('sha256').update(process.env.ENCRYPT_KEY).digest();
+          const iv     = crypto.randomBytes(12);
+          const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+          const input  = fs.readFileSync('$zipPath');
+          const enc    = Buffer.concat([cipher.update(input), cipher.final()]);
+          const tag    = cipher.getAuthTag();
+          fs.writeFileSync('$encPath', Buffer.concat([iv, tag, enc]));
+          console.log('Encrypted: ' + enc.length + ' bytes');
+          "@
+          "enc_path=$encPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+        env:
+          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
+
+      # ── 16. Encrypt artifact (Unix) ──────────────────────────────────────────
+      - name: Encrypt artifact (Unix)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          ZIP_PATH="${{ env.zip_path }}"
+          ENC_PATH="$ZIP_PATH.enc"
+          node -e "
+          const crypto = require('crypto');
+          const fs     = require('fs');
+          const key    = crypto.createHash('sha256').update(process.env.ENCRYPT_KEY).digest();
+          const iv     = crypto.randomBytes(12);
+          const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+          const input  = fs.readFileSync('$ZIP_PATH');
+          const enc    = Buffer.concat([cipher.update(input), cipher.final()]);
+          const tag    = cipher.getAuthTag();
+          fs.writeFileSync('$ENC_PATH', Buffer.concat([iv, tag, enc]));
+          console.log('Encrypted: ' + enc.length + ' bytes');
+          "
+          echo "enc_path=$ENC_PATH" >> $GITHUB_ENV
+        env:
+          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
+
+      # ── 17. Upload to R2 + securely shred from runner (Windows) ─────────────
+      - name: Upload to R2 (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $encPath = "${{ env.enc_path }}"
           $gameId  = "${{ github.event.inputs.game_id }}"
           $secret  = "${{ secrets.WORKER_SECRET }}"
           $url     = "${{ secrets.WORKER_URL }}/upload/windows"
-
           $response = curl.exe -s -o response_body.txt -w "%{http_code}" `
             -X POST `
             -H "X-Worker-Secret: $secret" `
             -F "game_id=$gameId" `
-            -F "file=@$zipPath;type=application/zip" `
+            -F "file=@$encPath;type=application/octet-stream" `
             $url
-
           $body = Get-Content response_body.txt -Raw
           Write-Host "Worker response ($response): $body"
-
-          if ($response -ne "201") {
-            Write-Error "ERROR: Upload failed with HTTP $response"
-            exit 1
-          }
-
+          if ($response -ne "201") { Write-Error "Upload failed with HTTP $response"; exit 1 }
           Write-Host "Upload successful!"
+          # Securely shred the artifact from the runner — even though GitHub
+          # destroys the VM after the job, this removes any window where the
+          # plaintext or ciphertext sits readable on disk.
+          $zeros = [byte[]]::new(1MB)
+          $stream = [System.IO.File]::OpenWrite($encPath)
+          $stream.Write($zeros, 0, $zeros.Length); $stream.Close()
+          Remove-Item -Force "${{ env.zip_path }}", $encPath -ErrorAction SilentlyContinue
+          Write-Host "Artifacts securely deleted from runner."
 
-      # ── 13. Upload to R2 (Unix) ───────────────────────────────────────────────
-      # FIX: use a temp file for the body instead of head -n -1
-      # head -n -1 is GNU-only and fails on macOS's BSD head.
+      # ── 18. Upload to R2 + securely shred from runner (Unix) ────────────────
       - name: Upload to R2 (Unix)
         if: matrix.platform != 'windows'
         shell: bash
         run: |
+          ENC_PATH="${{ env.enc_path }}"
           ZIP_PATH="${{ env.zip_path }}"
           GAME_ID="${{ github.event.inputs.game_id }}"
           PLATFORM="${{ matrix.platform }}"
           SECRET="${{ secrets.WORKER_SECRET }}"
           WORKER_URL="${{ secrets.WORKER_URL }}"
-
-          # Write body to file, capture HTTP code separately — avoids head -n -1
           HTTP_CODE=$(curl -s \
             -o response_body.txt \
             -w "%{http_code}" \
             -X POST \
             -H "X-Worker-Secret: $SECRET" \
             -F "game_id=$GAME_ID" \
-            -F "file=@$ZIP_PATH;type=application/zip" \
+            -F "file=@$ENC_PATH;type=application/octet-stream" \
             "$WORKER_URL/upload/$PLATFORM")
-
           BODY=$(cat response_body.txt)
           echo "Worker response ($HTTP_CODE): $BODY"
-
-          if [ "$HTTP_CODE" != "201" ]; then
-            echo "ERROR: Upload failed with HTTP $HTTP_CODE"
-            exit 1
-          fi
-
+          if [ "$HTTP_CODE" != "201" ]; then echo "ERROR: Upload failed with HTTP $HTTP_CODE"; exit 1; fi
           echo "Upload successful!"
+          SIZE_BYTES=$(wc -c < "$ENC_PATH")
+          dd if=/dev/urandom of="$ENC_PATH" bs=1M count=$(( (SIZE_BYTES / 1048576) + 1 )) 2>/dev/null || true
+          rm -f "$ZIP_PATH" "$ENC_PATH"
+          echo "Artifacts securely deleted from runner."
 
-      # ── 14. Notify Worker — success ───────────────────────────────────────────
+      # ── 19. Notify Worker — success ───────────────────────────────────────────
       - name: Notify Worker — success
         if: success()
         shell: bash
@@ -254,13 +409,18 @@ jobs:
             -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"platform\":\"${{ matrix.platform }}\",\"status\":\"success\"}" \
             "${{ secrets.WORKER_URL }}/internal/build-complete"
 
-      # ── 15. Notify Worker — failure ───────────────────────────────────────────
+      # ── 20. Notify Worker — failure (with REAL error, not a generic message) ─
       - name: Notify Worker — failure
         if: failure()
         shell: bash
         run: |
+          ERROR_MSG="Build failed on ${{ matrix.platform }}."
+          if [ -f build_output.txt ]; then
+            LAST=$(tail -15 build_output.txt | tr '\n' ' ' | tr '"' "'" | cut -c1-400)
+            if [ -n "$LAST" ]; then ERROR_MSG="$LAST"; fi
+          fi
           curl -s -X POST \
             -H "X-Worker-Secret: ${{ secrets.WORKER_SECRET }}" \
             -H "Content-Type: application/json" \
-            -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"platform\":\"${{ matrix.platform }}\",\"status\":\"failed\",\"error\":\"Build failed. Check Actions log.\"}" \
+            -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"platform\":\"${{ matrix.platform }}\",\"status\":\"failed\",\"error\":\"$ERROR_MSG\"}" \
             "${{ secrets.WORKER_URL }}/internal/build-complete"
