@@ -11,6 +11,10 @@ on:
         description: "Firebase UID of the dev who triggered the build"
         required: true
         type: string
+      build_run_id:
+        description: "Unique ID for this build run, used for status tracking"
+        required: true
+        type: string
 
 jobs:
   build:
@@ -35,6 +39,21 @@ jobs:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ── 1b. Notify Worker — build started ────────────────────────────────────
+      # Pings the Worker the moment a runner actually picks up this job —
+      # BEFORE the slow dependency install/compile steps. Without this, the
+      # dashboard has no way to distinguish "queued, GitHub hasn't started
+      # yet" from "actively building" — everything just sits at one
+      # ambiguous state for the entire 10-15 minute build.
+      - name: Notify Worker — build started
+        shell: bash
+        run: |
+          curl -s -X POST \
+            -H "X-Worker-Secret: ${{ secrets.WORKER_SECRET }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"buildRunId\":\"${{ github.event.inputs.build_run_id }}\",\"platform\":\"${{ matrix.platform }}\"}" \
+            "${{ secrets.WORKER_URL }}/internal/build-started" || true
 
       # ── 2. Linux dependencies ────────────────────────────────────────────────
       - name: Install Linux dependencies
@@ -406,7 +425,7 @@ jobs:
           curl -s -X POST \
             -H "X-Worker-Secret: ${{ secrets.WORKER_SECRET }}" \
             -H "Content-Type: application/json" \
-            -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"platform\":\"${{ matrix.platform }}\",\"status\":\"success\"}" \
+            -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"buildRunId\":\"${{ github.event.inputs.build_run_id }}\",\"platform\":\"${{ matrix.platform }}\",\"status\":\"success\"}" \
             "${{ secrets.WORKER_URL }}/internal/build-complete"
 
       # ── 20. Notify Worker — failure (with REAL error, not a generic message) ─
@@ -422,5 +441,5 @@ jobs:
           curl -s -X POST \
             -H "X-Worker-Secret: ${{ secrets.WORKER_SECRET }}" \
             -H "Content-Type: application/json" \
-            -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"platform\":\"${{ matrix.platform }}\",\"status\":\"failed\",\"error\":\"$ERROR_MSG\"}" \
+            -d "{\"gameId\":\"${{ github.event.inputs.game_id }}\",\"buildRunId\":\"${{ github.event.inputs.build_run_id }}\",\"platform\":\"${{ matrix.platform }}\",\"status\":\"failed\",\"error\":\"$ERROR_MSG\"}" \
             "${{ secrets.WORKER_URL }}/internal/build-complete"
