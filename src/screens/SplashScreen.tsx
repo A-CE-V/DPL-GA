@@ -1,3 +1,23 @@
+/**
+ * SplashScreen.tsx
+ *
+ * FIX — the "Deploy watermark" the dev asked to remove.
+ * Previously this screen showed the big centered Deploy logo/wordmark
+ * unconditionally on every single boot, regardless of tier. Now:
+ *   - Everyone sees a neutral, unbranded loading indicator by default
+ *     (no Deploy logo at all) while connectivity/ban checks run.
+ *   - ONLY once the game's config is fetched and profile.licenseType is
+ *     "solo" (the cheapest tier) does the branded Deploy reveal play,
+ *     briefly, before continuing — this is the intentional "watermark
+ *     just for the cheapest tier" behavior.
+ *   - Indie/Studio tier skip the branded reveal entirely and transition
+ *     straight through. They instead get a small persistent
+ *     "Made with Deploy's technology" mark on HomeScreen (see
+ *     components/Watermark.tsx) — one or the other, never both.
+ *   - Missing/undefined licenseType defaults to the Solo behavior (safest
+ *     — never accidentally skips branding for an old game doc that
+ *     predates this field).
+ */
 import { useEffect, useState, useCallback } from "react";
 import { WifiOff, ShieldX, RefreshCw, Clock } from "lucide-react";
 import { checkIPBan, checkMACBan, getClientIP, fetchGameConfig } from "../lib/firebase";
@@ -7,13 +27,15 @@ import { getMacAddress, isTauri }                                from "../lib/ip
 import { GAME_ID }                                               from "../lib/firebase";
 import type { GameConfig }                                       from "../types";
 
-type Status = "animating" | "checking" | "no-internet" | "banned" | "ok";
+type Status = "animating" | "checking" | "no-internet" | "banned" | "brand-reveal" | "ok";
 
 interface Props {
   onReady: (config: GameConfig, fromCache?: boolean) => void;
 }
 
-// ─── Status overlay ───────────────────────────────────────────────────────────
+const BRAND_REVEAL_MS = 1300; // how long the Solo-tier branded logo plays before continuing
+
+// ─── Status overlay (unchanged — errors are never branded either way) ────────
 function StatusScreen({
   Icon, iconColor, title, body, action,
 }: {
@@ -26,9 +48,25 @@ function StatusScreen({
         <div style={{ width: 60, height: 60, borderRadius: "50%", background: `${iconColor}14`, border: `1px solid ${iconColor}28`, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <Icon size={26} color={iconColor} />
         </div>
-        <p style={{ fontFamily: "'Syne',sans-serif", fontSize: 18, fontWeight: 700, color: "#f1f5f9" }}>{title}</p>
-        <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 12, color: "#475569", lineHeight: 1.7 }}>{body}</p>
+        <p style={{ fontFamily: "'Syne',sans-serif", fontSize: "var(--text-lg)", fontWeight: 700, color: "#f1f5f9" }}>{title}</p>
+        <p style={{ fontFamily: "'DM Mono',monospace", fontSize: "var(--text-sm)", color: "var(--text-muted)", lineHeight: 1.7 }}>{body}</p>
         {action}
+      </div>
+    </div>
+  );
+}
+
+// ─── Neutral loading indicator — shown by default, no branding at all ────────
+function NeutralLoader({ label }: { label?: string }) {
+  return (
+    <div style={{ ...FULL, background: "#020402" }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14, animation: "fadeIn 0.4s ease" }}>
+        <div style={{ width: 26, height: 26, borderRadius: "50%", border: "2px solid rgba(255,255,255,0.08)", borderTopColor: "rgba(255,255,255,0.4)", animation: "spin 0.7s linear infinite" }} />
+        {label && (
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: "var(--text-xs)", color: "rgba(255,255,255,0.28)", letterSpacing: "0.16em", textTransform: "uppercase" }}>
+            {label}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -36,30 +74,48 @@ function StatusScreen({
 
 // ─── Main component ────────────────────────────────────────────────────────────
 export function SplashScreen({ onReady }: Props) {
-  const [status,     setStatus]    = useState<Status>("animating");
-  const [visible,    setVisible]   = useState(false);
-  const [banReason,  setBanReason] = useState("");
-  const [usingCache, setUsingCache] = useState(false);
+  const [status,      setStatus]      = useState<Status>("animating");
+  const [banReason,   setBanReason]   = useState("");
+  const [usingCache,  setUsingCache]  = useState(false);
+  const [pendingReady, setPendingReady] = useState<{ config: GameConfig; fromCache: boolean } | null>(null);
+
+  // ── Decide whether this tier gets the branded reveal or skips straight through
+  const finishBoot = useCallback((config: GameConfig, fromCache: boolean) => {
+    const tier = config.profile?.licenseType ?? "solo"; // undefined defaults to the safest/most-restrictive
+    if (tier === "solo") {
+      setUsingCache(fromCache);
+      setPendingReady({ config, fromCache });
+      setStatus("brand-reveal");
+    } else {
+      setStatus("ok");
+      setTimeout(() => onReady(config, fromCache), 180);
+    }
+  }, [onReady]);
+
+  // Once the brand-reveal has played long enough, actually proceed.
+  useEffect(() => {
+    if (status !== "brand-reveal" || !pendingReady) return;
+    const t = setTimeout(() => {
+      setStatus("ok");
+      setTimeout(() => onReady(pendingReady.config, pendingReady.fromCache), 180);
+    }, BRAND_REVEAL_MS);
+    return () => clearTimeout(t);
+  }, [status, pendingReady, onReady]);
 
   useEffect(() => {
-    const frame = requestAnimationFrame(() => setTimeout(() => setVisible(true), 60));
-    const t     = setTimeout(() => setStatus("checking"), 600);
-    return () => { cancelAnimationFrame(frame); clearTimeout(t); };
+    const t = setTimeout(() => setStatus("checking"), 350);
+    return () => clearTimeout(t);
   }, []);
 
   const proceedWithCache = useCallback((cached: NonNullable<Awaited<ReturnType<typeof loadConfigCache>>>) => {
     const theme = getTheme(cached.config.profile?.themeId ?? "terminal");
     applyTheme(theme);
-    setUsingCache(true);
-    setStatus("ok");
-    setTimeout(() => onReady(cached.config, true), 200);
-  }, [onReady]);
+    finishBoot(cached.config, true);
+  }, [finishBoot]);
 
   const runChecks = useCallback(async () => {
-    // ── 1. Load cache early as fallback ───────────────────────────────────────
     const cached = await loadConfigCache(GAME_ID);
 
-    // ── 2. Offline fast-path ──────────────────────────────────────────────────
     if (!navigator.onLine) {
       if (cached) { proceedWithCache(cached); return; }
       setStatus("no-internet");
@@ -67,8 +123,6 @@ export function SplashScreen({ onReady }: Props) {
     }
 
     try {
-      // ── 3. Connectivity check + IP + MAC all fired in parallel ────────────
-      // MAC address requires Tauri; in web/dev mode it gracefully returns null.
       const [connOk, ip, macInfo] = await Promise.all([
         fetch("https://www.gstatic.com/generate_204", { mode: "no-cors", cache: "no-store", signal: AbortSignal.timeout(2500) })
           .then(() => true).catch(() => false),
@@ -82,24 +136,14 @@ export function SplashScreen({ onReady }: Props) {
         return;
       }
 
-      // ── 4. Ban checks — IP and MAC in parallel ────────────────────────────
       const [ipBan, macBan] = await Promise.all([
         checkIPBan(ip),
         macInfo?.mac ? checkMACBan(macInfo.mac) : Promise.resolve({ banned: false }),
       ]);
 
-      if (ipBan.banned) {
-        setBanReason(ipBan.reason ?? "");
-        setStatus("banned");
-        return;
-      }
-      if (macBan.banned) {
-        setBanReason(macBan.reason ?? "");
-        setStatus("banned");
-        return;
-      }
+      if (ipBan.banned) { setBanReason(ipBan.reason ?? ""); setStatus("banned"); return; }
+      if (macBan.banned) { setBanReason(macBan.reason ?? ""); setStatus("banned"); return; }
 
-      // ── 5. Fetch fresh config ─────────────────────────────────────────────
       const config = await fetchGameConfig();
       if (!config) {
         if (cached) { proceedWithCache(cached); return; }
@@ -108,14 +152,13 @@ export function SplashScreen({ onReady }: Props) {
       }
 
       applyTheme(getTheme(config.profile?.themeId ?? "terminal"));
-      setStatus("ok");
-      setTimeout(() => onReady(config, false), 200);
+      finishBoot(config, false);
 
     } catch {
       if (cached) { proceedWithCache(cached); return; }
       setStatus("no-internet");
     }
-  }, [onReady, proceedWithCache]);
+  }, [proceedWithCache, finishBoot]);
 
   useEffect(() => {
     if (status === "checking") runChecks();
@@ -126,7 +169,7 @@ export function SplashScreen({ onReady }: Props) {
     <StatusScreen
       Icon={WifiOff} iconColor="#ef4444"
       title="No Internet Connection"
-      body="Deploy Launcher needs an internet connection to start for the first time. Check your connection and try again."
+      body="This launcher needs an internet connection to start for the first time. Check your connection and try again."
       action={
         <button onClick={() => setStatus("checking")} style={BTN_STYLE}>
           <RefreshCw size={13} /> Retry
@@ -143,63 +186,40 @@ export function SplashScreen({ onReady }: Props) {
     />
   );
 
-  // ── Splash animation ────────────────────────────────────────────────────────
+  // ── Default: neutral, unbranded loading (animating / checking / ok-fade) ────
+  if (status === "animating" || status === "checking" || status === "ok") {
+    return (
+      <div style={{ opacity: status === "ok" ? 0 : 1, transition: status === "ok" ? "opacity 0.25s ease" : "none" }}>
+        <NeutralLoader label={status === "checking" ? "loading..." : undefined} />
+        {usingCache && status === "checking" && (
+          <div style={{ position: "absolute", bottom: 24, left: 0, right: 0, display: "flex", justifyContent: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 99, background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.18)" }}>
+              <Clock size={11} color="#eab308" />
+              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: "var(--text-2xs)", color: "#eab308", letterSpacing: "0.1em" }}>offline · cached data</span>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Solo-tier branded reveal — the ONLY place the Deploy logo still shows ───
   return (
-    <div style={{
-      ...FULL, background: "#020402",
-      display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center",
-      opacity:    status === "ok" ? 0 : 1,
-      transition: status === "ok" ? "opacity 0.3s ease" : "none",
-    }}>
+    <div style={{ ...FULL, background: "#020402", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
       <div style={{
         display: "flex", flexDirection: "column", alignItems: "center", gap: 20,
-        opacity:    visible ? 1 : 0,
-        filter:     visible ? "blur(0px)"  : "blur(18px)",
-        transform:  visible ? "scale(1)"   : "scale(0.93)",
-        transition: "opacity 0.9s cubic-bezier(0.4,0,0.2,1), filter 0.9s ease, transform 0.9s ease",
-        willChange: "opacity, filter, transform",
+        animation: "fadeInScale 0.9s cubic-bezier(0.22,1,0.36,1) forwards",
       }}>
-        <div style={{
-          width: 72, height: 72, borderRadius: 20, overflow: "hidden",
-          background: "#020402",
-          animation: visible ? "pulse-glow 3s ease-in-out infinite" : "none",
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}>
-          <img src="/images/logo-icon.png" alt="Deploy"
-            style={{ width: 72, height: 72, objectFit: "contain", mixBlendMode: "screen" }} />
+        <div style={{ width: 72, height: 72, borderRadius: 20, overflow: "hidden", background: "#020402", animation: "pulse-glow 3s ease-in-out infinite", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <img src="/images/logo-icon.png" alt="Deploy" style={{ width: 72, height: 72, objectFit: "contain", mixBlendMode: "screen" }} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-          <img src="/images/logo-title.png" alt="Deploy"
-            style={{ height: 28, width: "auto", objectFit: "contain", mixBlendMode: "screen", opacity: 0.9 }} />
-          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: "#22c55e", opacity: 0.5, letterSpacing: "0.26em", textTransform: "uppercase" }}>
+          <img src="/images/logo-title.png" alt="Deploy" style={{ height: 28, width: "auto", objectFit: "contain", mixBlendMode: "screen", opacity: 0.9 }} />
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: "var(--text-2xs)", color: "#22c55e", opacity: 0.5, letterSpacing: "0.26em", textTransform: "uppercase" }}>
             Launcher
           </span>
         </div>
       </div>
-
-      {status === "checking" && visible && (
-        <div style={{ marginTop: 48, display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 18, height: 18, borderRadius: "50%", border: "2px solid rgba(34,197,94,0.15)", borderTopColor: "#22c55e", animation: "spin 0.65s linear infinite" }} />
-          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: "rgba(34,197,94,0.4)", letterSpacing: "0.16em", textTransform: "uppercase" }}>
-            checking...
-          </span>
-        </div>
-      )}
-
-      {usingCache && visible && (
-        <div style={{
-          position: "absolute", bottom: 24,
-          display: "flex", alignItems: "center", gap: 6,
-          padding: "5px 12px", borderRadius: 99,
-          background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.18)",
-        }}>
-          <Clock size={11} color="#eab308" />
-          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: "#eab308", letterSpacing: "0.1em" }}>
-            offline · cached data
-          </span>
-        </div>
-      )}
     </div>
   );
 }
@@ -212,5 +232,5 @@ const BTN_STYLE: React.CSSProperties = {
   marginTop: 6, display: "flex", alignItems: "center", gap: 8,
   padding: "9px 20px", borderRadius: 9, border: "none",
   background: "#22c55e", color: "#000",
-  fontFamily: "'Syne',sans-serif", fontSize: 12, fontWeight: 700, cursor: "pointer",
+  fontFamily: "'Syne',sans-serif", fontSize: "var(--text-sm)", fontWeight: 700, cursor: "pointer",
 };

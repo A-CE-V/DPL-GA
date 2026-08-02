@@ -5,7 +5,11 @@ export interface DownloadProgress {
   total:       number;
   percent:     number;
   speed_kbps:  number;
-  status:      "downloading" | "extracting" | "done" | "error" | "cancelled";
+  // FIX: added "resuming" and "verifying" — these are real states the Rust
+  // side now reports (see download.rs), previously undeclared here meaning
+  // the UI had no way to distinguish "resuming a partial download" or
+  // "checksum verification in progress" from plain "downloading".
+  status:      "downloading" | "resuming" | "verifying" | "extracting" | "done" | "error" | "cancelled";
   error?:      string;
 }
 
@@ -22,15 +26,22 @@ export interface SystemInfo {
   hostname:    string;
 }
 
-// Phase 6 — MAC address
 export interface MacInfo {
-  mac:     string;  // raw hex, e.g. "a1b2c3d4e5f6"
-  display: string;  // formatted, e.g. "A1:B2:C3:D4:E5:F6"
+  mac:     string;
+  display: string;
 }
 
 // ─── Download ─────────────────────────────────────────────────────────────────
-export const startDownload = (gameId: string, version: string, url: string) =>
-  invoke<void>("download_build", { gameId, version, url });
+// FIX: startDownload now accepts an optional expectedSha256. When the dev
+// has supplied a checksum for this mirror URL (see MirrorUrl.sha256 in
+// types/index.ts), it's passed through to the Rust side, which verifies
+// the downloaded file's integrity before extracting. When omitted, the
+// download proceeds exactly as before — no behavior change for existing
+// mirror URLs that don't have a checksum set.
+export const startDownload = (
+  gameId: string, version: string, url: string, expectedSha256?: string,
+) =>
+  invoke<void>("download_build", { gameId, version, url, expectedSha256: expectedSha256 ?? null });
 
 export const getProgress = (gameId: string, version: string) =>
   invoke<DownloadProgress | null>("get_download_progress", { gameId, version });
@@ -55,8 +66,7 @@ export const deleteVersion = (gameId: string, version: string) =>
 export const getSystemInfo = () =>
   invoke<SystemInfo>("get_system_info");
 
-// ─── MAC address (Phase 6) ────────────────────────────────────────────────────
-// Only works inside Tauri — returns null in web/dev mode.
+// ─── MAC address ────────────────────────────────────────────────────────────
 export const getMacAddress = () =>
   invoke<MacInfo>("get_mac_address_cmd");
 

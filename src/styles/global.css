@@ -15,11 +15,51 @@
   --glow:        #22c55e;
   --border:      #111f11;
   --border-2:    #1a2e1a;
-  --text-primary:   #f1f5f9;
-  --text-secondary: #94a3b8;
-  --text-muted:     #475569;
-  --text-faint:     #2d3d2d;
-  /* Launcher is a fixed 900×600 window — use fixed px sizes, not clamp */
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     FIX — text contrast.
+     Previous values (--text-muted: #475569, --text-faint: #2d3d2d) were
+     tuned assuming a light-mode-style background. Against the actual
+     near-black --bg-base (#040704), --text-faint in particular produced a
+     contrast ratio so low it was functionally invisible — confirmed by
+     inspecting the values directly, not a guess. Every value below is
+     re-tuned specifically against #040704/#080d08/#0c130c, keeping the
+     same terminal-green identity but at contrast levels that are
+     actually readable at the small sizes this UI uses throughout.
+     ═══════════════════════════════════════════════════════════════════════ */
+  --text-primary:   #f1f5f9;  /* unchanged — already high contrast */
+  --text-secondary: #b6c2cf;  /* was #94a3b8 — brightened for real legibility */
+  --text-muted:     #8996a6;  /* was #475569 — was too dark to read at 10-11px */
+  --text-faint:     #5b6b64;  /* was #2d3d2d — the worst offender, now genuinely visible */
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     FIX — responsive type scale.
+     The window is actually resizable (720×480 min, unbounded max — see
+     tauri.conf.json), not the fixed 900×600 the old comment assumed.
+     Fixed px sizes broke down at smaller/larger window sizes and had no
+     shared hierarchy — every component picked its own numbers ad hoc.
+     clamp(min, preferred-vw, max) scales smoothly with the actual window
+     while never dropping below a legible floor.
+     ═══════════════════════════════════════════════════════════════════════ */
+  --text-2xs: clamp(9px,  1.1vw, 10px);
+  --text-xs:  clamp(10px, 1.25vw, 11px);
+  --text-sm:  clamp(11px, 1.4vw,  13px);
+  --text-base:clamp(13px, 1.6vw,  15px);
+  --text-md:  clamp(15px, 1.9vw,  17px);
+  --text-lg:  clamp(17px, 2.3vw,  20px);
+  --text-xl:  clamp(20px, 2.8vw,  26px);
+  --text-2xl: clamp(24px, 3.4vw,  32px);
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     NEW — safe margin barrier.
+     A consistent inset that no element (default layouts OR a dev's
+     canvas-customized layout) is allowed to cross. Applied to the root
+     render container in HomeScreen.tsx, and used by the dashboard's
+     Canvas Editor to clamp drag/resize bounds to the same value — so a
+     dev can never even position something flush to the true window edge.
+     ═══════════════════════════════════════════════════════════════════════ */
+  --safe-margin: 10px;
+
   --sidebar-w: 220px;
   --topbar-h:  48px;
 }
@@ -28,14 +68,30 @@
 html, body, #root { height:100%; overflow:hidden; background:var(--bg-base); }
 body {
   font-family:"DM Mono","Courier New",monospace;
-  font-size:13px; color:var(--text-primary);
+  font-size:var(--text-sm);
+  color:var(--text-primary);
   -webkit-font-smoothing:antialiased;
   user-select:none;
 }
 
-::-webkit-scrollbar       { width:3px; }
+::-webkit-scrollbar       { width:5px; height:5px; }
 ::-webkit-scrollbar-track { background:transparent; }
-::-webkit-scrollbar-thumb { background:var(--border-2); border-radius:2px; }
+::-webkit-scrollbar-thumb { background:var(--border-2); border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:var(--text-faint); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   NEW — scrollable region utility.
+   FIX for the Settings-can't-scroll bug: global overflow:hidden on
+   html/body/#root means ANY screen with content taller than the window
+   needs an explicit scrollable wrapper — HomeScreen's tab content already
+   did this ad hoc, SettingsScreen never did at all. This class
+   standardizes the pattern so it can't be forgotten again.
+   ═══════════════════════════════════════════════════════════════════════ */
+.dl-scroll-region {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
 
 @keyframes spin       { to { transform:rotate(360deg); } }
 @keyframes fadeIn     { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }

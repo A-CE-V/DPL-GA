@@ -40,3 +40,10 @@ futures-util = "0.3"
 anyhow       = "1"
 hostname     = "0.3"
 mac_address  = "1.1"
+
+# NEW — download resume + SHA-256 verification.
+# Both already existed as transitive dependencies (confirmed in Cargo.lock
+# before this change), so promoting them to direct dependencies here should
+# resolve to the same versions already in the tree with no new conflicts.
+sha2         = "0.10"
+hex          = "0.4"
