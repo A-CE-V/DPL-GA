@@ -138,7 +138,7 @@ export function SplashScreen({ onReady }: Props) {
 
       const [ipBan, macBan] = await Promise.all([
         checkIPBan(ip),
-        macInfo?.mac ? checkMACBan(macInfo.mac) : Promise.resolve({ banned: false }),
+        macInfo?.mac ? checkMACBan(macInfo.mac) : Promise.resolve({ banned: false, reason: undefined }),
       ]);
 
       if (ipBan.banned) { setBanReason(ipBan.reason ?? ""); setStatus("banned"); return; }

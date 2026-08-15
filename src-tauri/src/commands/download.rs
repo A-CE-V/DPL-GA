@@ -42,6 +42,29 @@ fn game_dir(game_id: &str, version: &str) -> PathBuf {
         .join(version)
 }
 
+// A standard Dropbox share link defaults to `dl=0`, which — when fetched
+// by a plain HTTP client with no cookies/JS, exactly what reqwest does
+// here — serves Dropbox's HTML preview page instead of the actual file.
+// That HTML then gets saved as if it were the build archive, so it "downloads"
+// (a small, fast, misleadingly successful-looking transfer) but fails at
+// the extraction step below because it isn't a real zip. Forcing `dl=1`
+// makes Dropbox return the raw file bytes directly. This is a plain string
+// rewrite of the query parameter — it changes nothing about which file
+// Dropbox serves, only whether it hands over the bytes or a webpage.
+fn normalize_download_url(url: &str) -> String {
+    if !url.contains("dropbox.com") {
+        return url.to_string();
+    }
+    if url.contains("dl=0") {
+        return url.replacen("dl=0", "dl=1", 1);
+    }
+    if !url.contains("dl=1") {
+        let sep = if url.contains('?') { "&" } else { "?" };
+        return format!("{url}{sep}dl=1");
+    }
+    url.to_string()
+}
+
 fn detect_archive_type(url: &str) -> &'static str {
     let url_lower = url.split('?').next().unwrap_or(url).to_lowercase();
     if url_lower.ends_with(".zip")                                     { return "zip";      }
@@ -68,6 +91,55 @@ fn sha256_file(path: &PathBuf) -> Result<String, String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+// Extracts a zip one entry at a time (instead of the crate's own all-at-once
+// arch.extract()) so real progress can be reported as it goes. Runs on a
+// blocking-pool thread (see spawn_blocking above), so std::fs/std::io calls
+// here are fine to use directly.
+//
+// entry.enclosed_name() is the same zip-slip guard arch.extract() uses
+// internally — entries with unsafe paths (absolute paths, `../` escapes)
+// return None and are skipped rather than followed, so this isn't a
+// weaker safety story than the single-call version it replaces.
+fn extract_zip_with_progress(
+    tmp_path: &PathBuf,
+    dest_dir: &PathBuf,
+    progress: &ProgressMap,
+    key:      &str,
+) -> Result<(), String> {
+    let file = std::fs::File::open(tmp_path).map_err(|e| e.to_string())?;
+    let mut arch = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let total = arch.len();
+
+    for i in 0..total {
+        let mut entry = arch.by_index(i).map_err(|e| e.to_string())?;
+        let outpath = match entry.enclosed_name() {
+            Some(p) => dest_dir.join(p),
+            None    => continue,
+        };
+
+        if entry.is_dir() {
+            std::fs::create_dir_all(&outpath).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+        }
+
+        // Real per-entry progress — game build archives are typically a few
+        // hundred to a few thousand files, cheap enough to update every one.
+        if let Ok(mut p) = progress.lock() {
+            if let Some(e) = p.get_mut(key) {
+                e.downloaded = (i + 1) as u64;
+                e.total      = total as u64;
+                e.percent    = ((i + 1) as f64 / total.max(1) as f64) * 100.0;
+            }
+        }
+    }
+    Ok(())
+}
+
 // ─── IPC Commands ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -85,6 +157,20 @@ pub async fn download_build(
     let key      = format!("{game_id}_{version}");
     let progress = Arc::clone(&state.progress);
     let cancel   = Arc::clone(&state.cancel);
+
+    // FIX — found while investigating "the progress bar makes strange
+    // movements". cancel_download sets cancel[key] = true and nothing ever
+    // clears it — including here, previously. Since the same cancel (X)
+    // button also dismisses failed downloads (see HomeScreen.tsx), any
+    // download that was ever dismissed after an error left this flag set
+    // forever. Every later attempt for that exact game+version would then
+    // see a stale "cancelled" flag on its very first chunk and abort almost
+    // immediately — looking like the download randomly stalls or resets
+    // rather than actually running. A fresh attempt should always start
+    // clean regardless of what happened to a previous one.
+    cancel.lock().unwrap().remove(&key);
+
+    let url      = normalize_download_url(&url);
 
     let dest_dir = game_dir(&game_id, &version);
     std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
@@ -203,7 +289,7 @@ pub async fn download_build(
                 0.0
             };
 
-            let percent = if total > 0 { (downloaded as f64 / total as f64) * 100.0 } else { 0.0 };
+            let percent = if total > 0 { ((downloaded as f64 / total as f64) * 100.0).min(100.0) } else { 0.0 };
             let mut p   = progress.lock().unwrap();
             if let Some(entry) = p.get_mut(&key) {
                 entry.downloaded = downloaded;
@@ -258,33 +344,44 @@ pub async fn download_build(
         }
 
         // ── Extraction ──────────────────────────────────────────────────────
+        // FIX — this used to be a single blocking arch.extract(&dest_dir)
+        // call with zero progress feedback for its entire duration (could
+        // easily be 30s-2min+ for a multi-GB game), plus it ran directly
+        // inline in this async task, blocking a tokio worker thread the
+        // whole time — which could delay get_download_progress polling for
+        // this AND any other concurrent download. Now extracts one entry at
+        // a time with a real percent after each, via spawn_blocking so the
+        // async runtime stays responsive throughout.
         {
             let mut p = progress.lock().unwrap();
             if let Some(entry) = p.get_mut(&key) {
-                entry.status = "extracting".into();
+                entry.status     = "extracting".into();
+                entry.percent    = 0.0;
+                entry.downloaded = 0;
+                entry.total      = 0;
+                entry.speed_kbps = 0.0;
             }
         }
 
-        let extract_result: Result<(), String> = match archive_type.as_str() {
-            "zip" => {
-                match std::fs::File::open(&tmp_path) {
-                    Err(e) => Err(e.to_string()),
-                    Ok(f)  => match zip::ZipArchive::new(f) {
-                        Err(e)       => Err(e.to_string()),
-                        Ok(mut arch) => arch.extract(&dest_dir).map_err(|e| e.to_string()),
-                    },
+        let blocking_progress      = Arc::clone(&progress);
+        let blocking_key           = key.clone();
+        let blocking_archive_type  = archive_type.clone();
+        let blocking_tmp_path      = tmp_path.clone();
+        let blocking_dest_dir      = dest_dir.clone();
+        let blocking_url           = url.clone();
+
+        let extract_result: Result<(), String> = tokio::task::spawn_blocking(move || {
+            match blocking_archive_type.as_str() {
+                "zip" => extract_zip_with_progress(&blocking_tmp_path, &blocking_dest_dir, &blocking_progress, &blocking_key),
+                "exe" | "msi" | "dmg" | "appimage" => {
+                    let target = blocking_dest_dir.join(
+                        std::path::Path::new(&blocking_url).file_name().unwrap_or_default()
+                    );
+                    std::fs::rename(&blocking_tmp_path, &target).map_err(|e| e.to_string())
                 }
+                other => Err(format!("Unsupported archive type: {other}")),
             }
-            "exe" | "msi" | "dmg" | "appimage" => {
-                let target = dest_dir.join(
-                    std::path::Path::new(&url)
-                        .file_name()
-                        .unwrap_or_default()
-                );
-                std::fs::rename(&tmp_path, &target).map_err(|e| e.to_string())
-            }
-            _ => Err(format!("Unsupported archive type: {archive_type}")),
-        };
+        }).await.unwrap_or_else(|e| Err(format!("Extraction task panicked: {e}")));
 
         let _ = std::fs::remove_file(&tmp_path);
 
@@ -325,6 +422,7 @@ pub async fn cancel_download(
 
 #[tauri::command]
 pub async fn check_url_availability(url: String) -> Result<bool, String> {
+    let url    = normalize_download_url(&url);
     let client = Client::new();
     match client.head(&url).send().await {
         Ok(res) => Ok(res.status().is_success()),

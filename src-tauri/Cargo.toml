@@ -47,3 +47,12 @@ mac_address  = "1.1"
 # resolve to the same versions already in the tree with no new conflicts.
 sha2         = "0.10"
 hex          = "0.4"
+
+# NEW — image caching (screenshots/logo loaded from dev-supplied URLs).
+# Cached bytes are returned to the frontend as base64 data URLs rather than
+# served through Tauri's asset:// protocol, specifically to avoid touching
+# tauri.conf.json's asset-protocol scope or any capabilities/*.json file —
+# given the recent stale-permissions build issue on this project, anything
+# that could add a NEW permission surface gets avoided in favor of a plain
+# IPC return value.
+base64       = "0.22"

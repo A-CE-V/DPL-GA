@@ -26,6 +26,16 @@ export interface GameVersion {
   mac:       MirrorUrl[];
   linux:     MirrorUrl[];
   mobile:    MirrorUrl[];
+  // NEW — optional executable path (relative to the extracted build's root)
+  // the launcher should run for this platform. When unset, launch_game
+  // falls back to auto-detecting the first matching file it finds (see
+  // find_executable in launch.rs) — which can pick the wrong one for games
+  // that ship more than one .exe/binary (crash handlers, redistributable
+  // installers, uninstallers, etc). Not applicable to "mobile" since the
+  // desktop launcher never spawns those itself.
+  windowsExeName?: string;
+  macExeName?:     string;
+  linuxExeName?:   string;
 }
 
 // NEW — matches the dashboard's LicenseType. Duplicated here (not imported)
@@ -61,6 +71,20 @@ export interface GameProfile {
   // restrictive/safe) if missing, so an old game doc without this field
   // never accidentally skips the watermark.
   licenseType?:    LicenseType;
+  // NEW — lets a dev rely on their logo image instead of the text title
+  // (e.g. when the logo already contains the game's name as artwork).
+  // Optional and defaults to showing the title (undefined = false) so
+  // existing games are unaffected.
+  hideTitle?:      boolean;
+  // NEW — media display customization. "carousel" (default) is one image
+  // at a time with arrows + dots; "big-row" is one big image with
+  // thumbnails in a row below it; "big-left" is the same but thumbnails
+  // stacked on the left. autoAdvance cycles through images on a timer
+  // (mediaAutoAdvanceSeconds, default 5) in addition to manual arrows/dots
+  // — it doesn't replace them.
+  mediaDisplayMode?:        "carousel" | "big-row" | "big-left";
+  mediaAutoAdvance?:        boolean;
+  mediaAutoAdvanceSeconds?: number;
 }
 
 // NEW — mirrors the dashboard's CustomThemeColors shape so

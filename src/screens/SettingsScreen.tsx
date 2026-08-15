@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import {
   ArrowLeft, Trash2, RefreshCw, Check, WifiOff, Clock,
-  HardDrive, Settings, Info, ToggleLeft,
+  HardDrive, Settings, Info, ToggleLeft, FolderOpen,
 } from "lucide-react";
-import { getInstalledVersion, deleteVersion, isTauri } from "../lib/ipc";
+import { getInstalledVersion, deleteVersion, openInstallFolder, isTauri } from "../lib/ipc";
 import { clearConfigCache, cacheAge, loadConfigCache } from "../lib/cache";
 import { GAME_ID }  from "../lib/firebase";
 import type { GameConfig, GameVersion } from "../types";
@@ -23,13 +23,16 @@ export interface PlayerPrefs {
   analyticsOptOut: boolean;
   disableAutoUpdate: boolean;
   preferredVersion?: string;
+  // NEW — "don't ask again" from the download confirmation modal (see
+  // HomeScreen.tsx handleDownload).
+  skipDownloadConfirm?: boolean;
 }
 
 export function loadPrefs(): PlayerPrefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
-    return raw ? JSON.parse(raw) : { analyticsOptOut: false, disableAutoUpdate: false };
-  } catch { return { analyticsOptOut: false, disableAutoUpdate: false }; }
+    return raw ? JSON.parse(raw) : { analyticsOptOut: false, disableAutoUpdate: false, skipDownloadConfirm: false };
+  } catch { return { analyticsOptOut: false, disableAutoUpdate: false, skipDownloadConfirm: false }; }
 }
 
 export function savePrefs(prefs: PlayerPrefs): void {
@@ -103,6 +106,10 @@ function InstalledVersionRow({
     }
   };
 
+  const handleOpenFolder = () => {
+    openInstallFolder(GAME_ID, version.tag).catch(e => console.error("[SettingsScreen] open folder failed:", e));
+  };
+
   if (deleted) return null;
 
   const isInstalled = !!info;
@@ -132,23 +139,39 @@ function InstalledVersionRow({
         )}
       </div>
       {isInstalled && (
-        <button
-          onClick={handleDelete}
-          disabled={deleting}
-          title="Delete local files"
-          style={{
-            display: "flex", alignItems: "center", gap: 5,
-            padding: "5px 10px", borderRadius: 7,
-            background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.15)",
-            color: "#f87171", fontFamily: "'DM Mono',monospace", fontSize: "var(--text-xs)",
-            cursor: deleting ? "not-allowed" : "pointer", opacity: deleting ? 0.5 : 1,
-          }}
-        >
-          {deleting
-            ? <RefreshCw size={11} style={{ animation: "spin 0.65s linear infinite" }} />
-            : <Trash2 size={11} />}
-          {deleting ? "Deleting..." : "Delete"}
-        </button>
+        <>
+          <button
+            onClick={handleOpenFolder}
+            title="Open install folder"
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "5px 10px", borderRadius: 7,
+              background: "var(--bg-base)", border: "1px solid var(--border)",
+              color: "var(--text-secondary)", fontFamily: "'DM Mono',monospace", fontSize: "var(--text-xs)",
+              cursor: "pointer",
+            }}
+          >
+            <FolderOpen size={11} />
+            Open Folder
+          </button>
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            title="Delete local files"
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "5px 10px", borderRadius: 7,
+              background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.15)",
+              color: "#f87171", fontFamily: "'DM Mono',monospace", fontSize: "var(--text-xs)",
+              cursor: deleting ? "not-allowed" : "pointer", opacity: deleting ? 0.5 : 1,
+            }}
+          >
+            {deleting
+              ? <RefreshCw size={11} style={{ animation: "spin 0.65s linear infinite" }} />
+              : <Trash2 size={11} />}
+            {deleting ? "Deleting..." : "Delete"}
+          </button>
+        </>
       )}
     </div>
   );
@@ -171,6 +194,19 @@ export function SettingsScreen({ config, versions, onBack, fromCache = false }: 
   const [cacheInfo,    setCacheInfo]    = useState<{ age: string; version: string } | null>(null);
   const [savedPrefs,   setSavedPrefs]   = useState(false);
   const [localVersions, setLocalVersions] = useState<GameVersion[]>(versions);
+
+  // FIX — useState(versions) only seeds this on first mount; it never
+  // re-syncs when the versions prop updates afterward. If this screen was
+  // reached before the initial version fetch finished (or a later refresh
+  // brought in versions that didn't exist yet at mount time), localVersions
+  // stayed permanently stuck at whatever it was — which is why a version
+  // that was genuinely installed could still show "No versions downloaded."
+  // The per-row install check inside InstalledVersionRow was never the
+  // problem; the row for that version just never existed to check in the
+  // first place. Deletion still updates localVersions optimistically in
+  // between syncs (see onDelete below) — this only keeps it aligned with
+  // the real list, not fighting it.
+  useEffect(() => { setLocalVersions(versions); }, [versions]);
 
   useEffect(() => {
     loadConfigCache(GAME_ID).then(c => {

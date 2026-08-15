@@ -5,14 +5,18 @@ import {
   ArrowUpCircle, Loader, ShieldCheck, RotateCcw, Sparkles, Wrench, AlertTriangle, FileText,
 } from "lucide-react";
 import { FaItchIo, FaYoutube } from "react-icons/fa";
+import { CachedImage } from "../components/CachedImage";
+import { Modal } from "../components/Modal";
+import { MarqueeText } from "../components/MarqueeText";
+import { MediaGallery } from "../components/MediaGallery";
 import {
-  startDownload, getProgress, cancelDownload, launchGame,
+  startDownload, getProgress, cancelDownload, launchGame, isGameRunning,
   getInstalledVersion, deleteVersion, checkUrl, isTauri,
   type DownloadProgress,
 } from "../lib/ipc";
 import { fetchVersions, fetchChangelog, fetchMedia, GAME_ID, logSession } from "../lib/firebase";
 import { checkForLauncherUpdate, type LauncherUpdate } from "../lib/updater";
-import { loadPrefs } from "./SettingsScreen";
+import { loadPrefs, savePrefs } from "./SettingsScreen";
 import { Watermark } from "../components/Watermark";
 import type { GameConfig, GameVersion, ChangelogEntry, GameMedia, Platform, CanvasComponent, ChangelogType } from "../types";
 
@@ -64,11 +68,32 @@ const DOWNLOAD_STATUS_META: Record<string, { label: string; Icon: React.Componen
 };
 
 function ProgressBar({ progress, accent }: { progress: DownloadProgress & { status: string }; accent: string }) {
+  // FIX — surface a failed download/extraction instead of silently
+  // vanishing. See the polling loop above: "error" entries are no longer
+  // deleted the instant they appear, so this now actually gets a chance to
+  // render. Shows the real message from the Rust side (checksum mismatch,
+  // invalid archive, network failure, etc.) instead of a generic state.
+  if (progress.status === "error") {
+    return (
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: "var(--text-xs)", color: "#f87171", fontFamily: "'DM Mono',monospace", lineHeight: 1.4 }}>
+        <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+        <span>{progress.error ?? "Download failed."}</span>
+      </div>
+    );
+  }
+
   const pct   = Math.round(progress.percent);
   const speed = progress.speed_kbps > 0 ? (progress.speed_kbps > 1024 ? `${(progress.speed_kbps / 1024).toFixed(1)} MB/s` : `${Math.round(progress.speed_kbps)} KB/s`) : "";
   const mb    = (n: number) => `${(n / 1_048_576).toFixed(1)} MB`;
   const meta  = DOWNLOAD_STATUS_META[progress.status] ?? DOWNLOAD_STATUS_META.downloading;
-  const isIndeterminate = progress.status === "starting" || progress.status === "verifying" || progress.status === "extracting";
+  // FIX — "extracting" used to be lumped in as indeterminate (a fixed 40%
+  // shimmer, no real numbers) because the Rust side only reported progress
+  // once, at the very start, with no updates for the rest of a call that
+  // could run 30s-2min+ on a large archive. It now reports real per-entry
+  // progress (see extract_zip_with_progress in download.rs), so it belongs
+  // with the other real-progress states instead.
+  const isIndeterminate = progress.status === "starting" || progress.status === "verifying";
+  const isExtracting    = progress.status === "extracting";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -79,7 +104,7 @@ function ProgressBar({ progress, accent }: { progress: DownloadProgress & { stat
         </span>
         {!isIndeterminate && progress.total > 0 && (
           <span style={{ fontSize: "var(--text-2xs)", color: "var(--text-muted)", fontFamily: "'DM Mono',monospace", flexShrink: 0 }}>
-            {mb(progress.downloaded)} / {mb(progress.total)}
+            {isExtracting ? `${progress.downloaded} / ${progress.total} files` : `${mb(progress.downloaded)} / ${mb(progress.total)}`}
           </span>
         )}
       </div>
@@ -95,20 +120,84 @@ function ProgressBar({ progress, accent }: { progress: DownloadProgress & { stat
   );
 }
 
+// FIX — was an inline banner pinned to the top of the screen, dismissible
+// and easy to miss. Now a proper modal — "a window telling about a new
+// update", as asked for — using the same install-state logic as before.
 function UpdateBanner({ update, accent, onDismiss }: { update: LauncherUpdate; accent: string; onDismiss: () => void }) {
   const [installing, setInstalling] = useState(false);
   return (
-    <div style={{ margin: "12px 20px 0", padding: "10px 14px", borderRadius: 10, background: `${accent}0d`, border: `1px solid ${accent}30`, display: "flex", alignItems: "center", gap: 10 }}>
-      <ArrowUpCircle size={15} color={accent} style={{ flexShrink: 0 }} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <p style={{ fontSize: "var(--text-sm)", fontFamily: "'Syne',sans-serif", fontWeight: 700, color: "var(--text-primary)" }}>Launcher update available — v{update.version}</p>
-        {update.notes && <p style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", fontFamily: "'DM Mono',monospace", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{update.notes}</p>}
+    <Modal onClose={installing ? undefined : onDismiss}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+        <ArrowUpCircle size={26} color={accent} style={{ flexShrink: 0 }} />
+        <div style={{ minWidth: 0 }}>
+          <p style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "var(--text-md)", color: "var(--text-primary)" }}>Launcher update available</p>
+          <p style={{ fontFamily: "'DM Mono',monospace", fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>v{update.version}</p>
+        </div>
       </div>
-      <button onClick={async () => { setInstalling(true); try { await update.download(); } catch { setInstalling(false); } }} disabled={installing} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 7, border: "none", background: accent, color: "#000", fontFamily: "'Syne',sans-serif", fontSize: "var(--text-xs)", fontWeight: 700, cursor: installing ? "default" : "pointer", flexShrink: 0, opacity: installing ? 0.7 : 1 }}>
-        {installing ? <><Loader size={11} style={{ animation: "spin 0.65s linear infinite" }} /> Installing...</> : <><ArrowUpCircle size={11} /> Install</>}
-      </button>
-      {!installing && <button onClick={onDismiss} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex", padding: 2 }}><X size={13} /></button>}
-    </div>
+      {update.notes && (
+        <p style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", lineHeight: 1.55, marginBottom: 18, maxHeight: 140, overflowY: "auto", whiteSpace: "pre-wrap" }}>
+          {update.notes}
+        </p>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        {!installing && (
+          <button onClick={onDismiss} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "1px solid var(--border)", background: "none", color: "var(--text-muted)", fontFamily: "'DM Mono',monospace", fontSize: "var(--text-sm)", cursor: "pointer" }}>
+            Later
+          </button>
+        )}
+        <button onClick={async () => { setInstalling(true); try { await update.download(); } catch { setInstalling(false); } }} disabled={installing} style={{ flex: installing ? 1 : 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 8, border: "none", background: accent, color: "#000", fontFamily: "'Syne',sans-serif", fontSize: "var(--text-sm)", fontWeight: 700, cursor: installing ? "default" : "pointer", opacity: installing ? 0.75 : 1 }}>
+          {installing ? <><Loader size={13} style={{ animation: "spin 0.65s linear infinite" }} /> Installing...</> : <><ArrowUpCircle size={13} /> Install & Restart</>}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// NEW — download confirmation, per your request: a prompt before every
+// download starts instead of it firing immediately, with a "don't ask
+// again" checkbox that persists to the same PlayerPrefs SettingsScreen
+// reads/writes (skipDownloadConfirm).
+function DownloadConfirmModal({
+  version, title, accent, onConfirm, onCancel,
+}: {
+  version: GameVersion; title: string; accent: string;
+  onConfirm: () => void; onCancel: () => void;
+}) {
+  const [dontAskAgain, setDontAskAgain] = useState(false);
+
+  const handleConfirm = () => {
+    if (dontAskAgain) savePrefs({ ...loadPrefs(), skipDownloadConfirm: true });
+    onConfirm();
+  };
+
+  return (
+    <Modal onClose={onCancel}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <Download size={26} color={accent} style={{ flexShrink: 0 }} />
+        <div style={{ minWidth: 0 }}>
+          <p style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "var(--text-md)", color: "var(--text-primary)" }}>Download {title}?</p>
+          <p style={{ fontFamily: "'DM Mono',monospace", fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>v{version.tag}</p>
+        </div>
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18, cursor: "pointer", userSelect: "none" }}>
+        <input
+          type="checkbox" checked={dontAskAgain}
+          onChange={e => setDontAskAgain(e.target.checked)}
+          style={{ width: 15, height: 15, accentColor: accent, cursor: "pointer", flexShrink: 0 }}
+        />
+        <span style={{ fontSize: "var(--text-xs)", color: "var(--text-secondary)", fontFamily: "'DM Mono',monospace" }}>
+          Don't ask me again
+        </span>
+      </label>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={onCancel} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: "1px solid var(--border)", background: "none", color: "var(--text-muted)", fontFamily: "'DM Mono',monospace", fontSize: "var(--text-sm)", cursor: "pointer" }}>
+          Cancel
+        </button>
+        <button onClick={handleConfirm} style={{ flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 8, border: "none", background: accent, color: "#000", fontFamily: "'Syne',sans-serif", fontSize: "var(--text-sm)", fontWeight: 700, cursor: "pointer" }}>
+          <Download size={13} /> Download
+        </button>
+      </div>
+    </Modal>
   );
 }
 
@@ -180,13 +269,13 @@ interface LayoutProps {
   config: GameConfig; fromCache: boolean; platform: Platform;
   versions: GameVersion[]; changelog: ChangelogEntry[]; media: GameMedia[];
   installing: Record<string, DownloadProgress>; installed: Record<string, boolean>;
+  running: Record<string, boolean>;
   launching: boolean; expanded: string | null; mediaIdx: number;
-  launcherUpdate: LauncherUpdate | null; updateDismissed: boolean;
+  refreshing: boolean; refreshResult: "idle" | "updated" | "current"; onRefresh: () => void;
   onDownload: (v: GameVersion) => void; onCancel: (tag: string) => void;
   onDelete: (tag: string) => void; onLaunch: (tag?: string) => void;
   onSettings: () => void;
   setExpanded: (id: string | null) => void; setMediaIdx: (i: number) => void;
-  setUpdateDismissed: (v: boolean) => void;
 }
 
 function TierWatermark({ profile, settings }: { profile: GameConfig["profile"]; settings: GameConfig["settings"] }) {
@@ -200,11 +289,12 @@ function TierWatermark({ profile, settings }: { profile: GameConfig["profile"]; 
 // CANVAS LAYOUT RENDERER
 // ════════════════════════════════════════════════════════════════════════════
 function LayoutCanvas(p: LayoutProps) {
-  const { config, fromCache, versions, media, changelog, installing, installed, launching, launcherUpdate, updateDismissed, expanded } = p;
+  const { config, fromCache, versions, media, changelog, installing, installed, running, launching, expanded, refreshing, refreshResult, onRefresh } = p;
   const { profile, settings, socials } = config;
   const accent  = profile.accentColor;
   const latest  = versions[0];
-  const canLaunch = latest && installed[latest.tag] && !launching;
+  const isRunning = !!(latest && running[latest.tag]);
+  const canLaunch = latest && installed[latest.tag] && !launching && !isRunning;
   const SOCIALS = buildSocials(socials);
   const CANVAS_W = 900, CANVAS_H = 600;
   const layout  = (profile.canvasLayout ?? []).map(c => clampToSafeArea(c, CANVAS_W, CANVAS_H));
@@ -214,7 +304,10 @@ function LayoutCanvas(p: LayoutProps) {
     const style: React.CSSProperties = { position: "absolute", left: comp.x, top: comp.y, width: comp.w, height: comp.h, zIndex: comp.zIndex, overflow: "hidden" };
     switch (comp.type) {
       case "game-title":
-        return <div key={comp.id} style={style}><p style={{ fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: Math.max(14, comp.h * 0.55), fontWeight: 900, color: "var(--text-primary)", letterSpacing: "-0.02em", lineHeight: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profile.title}</p></div>;
+        // NEW — hideTitle lets a dev rely on their logo instead; skip
+        // rendering entirely rather than an empty box taking up space.
+        if (profile.hideTitle) return null;
+        return <div key={comp.id} style={style}><MarqueeText text={profile.title} style={{ fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: Math.max(14, comp.h * 0.55), fontWeight: 900, color: "var(--text-primary)", letterSpacing: "-0.02em", lineHeight: 1 }} /></div>;
       case "author-label":
         return <div key={comp.id} style={style}><p style={{ fontFamily: "'DM Mono',monospace", fontSize: Math.max(10, comp.h * 0.45), color: "var(--text-muted)" }}>by {profile.author} · v{profile.version}</p></div>;
       case "game-description":
@@ -227,17 +320,20 @@ function LayoutCanvas(p: LayoutProps) {
             {latest && <ProgressBar progress={dl} accent={accent} />}
           </div>
         ) : (
-          <button onClick={() => canLaunch ? p.onLaunch() : latest && p.onDownload(latest)} disabled={launching} style={{ width: "100%", height: "100%", borderRadius: 8, border: "none", background: canLaunch ? accent : `${accent}22`, color: canLaunch ? "#000" : accent, fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: Math.max(12, comp.h * 0.3), fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-            {launching ? "Launching..." : canLaunch ? <><Play size={Math.min(18, comp.h * 0.35)} fill="currentColor" /> Launch</> : <><Download size={Math.min(16, comp.h * 0.3)} /> Download</>}
+          <button onClick={() => canLaunch ? p.onLaunch() : !isRunning && latest && p.onDownload(latest)} disabled={launching || isRunning} style={{ width: "100%", height: "100%", borderRadius: 8, border: "none", background: isRunning ? "var(--bg-elevated)" : canLaunch ? accent : `${accent}22`, color: isRunning ? "var(--text-secondary)" : canLaunch ? "#000" : accent, fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: Math.max(12, comp.h * 0.3), fontWeight: 800, cursor: isRunning ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            {launching ? "Launching..." : isRunning ? <><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", animation: "pulse 1.4s ease infinite" }} /> Running</> : canLaunch ? <><Play size={Math.min(18, comp.h * 0.35)} fill="currentColor" /> Launch</> : <><Download size={Math.min(16, comp.h * 0.3)} /> Download</>}
           </button>
         )}</div>;
       }
       case "version-badge":
         return latest ? <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center" }}><span style={{ fontSize: "var(--text-2xs)", padding: "3px 10px", borderRadius: 99, background: `${accent}18`, color: accent, fontFamily: "'DM Mono',monospace", fontWeight: 700, border: `1px solid ${accent}33`, whiteSpace: "nowrap" }}>{latest.status === "stable" ? <Check size={9} style={{ display: "inline", verticalAlign: "-1px" }} /> : <AlertTriangle size={9} style={{ display: "inline", verticalAlign: "-1px" }} />} v{latest.tag}</span></div> : null;
       case "media-carousel":
-        return <div key={comp.id} style={{ ...style, borderRadius: 8, overflow: "hidden", background: "var(--bg-elevated)", border: "1px solid var(--border)", position: "relative" }}>
-          {media[p.mediaIdx] ? <img src={media[p.mediaIdx].url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} /> : <div style={{ width: "100%", height: "100%", background: "linear-gradient(135deg, var(--accent-1), var(--bg-base))" }} />}
-          {media.length > 1 && <div style={{ position: "absolute", bottom: 6, left: 0, right: 0, display: "flex", justifyContent: "center", gap: 4 }}>{media.map((_, i) => <button key={i} onClick={() => p.setMediaIdx(i)} style={{ width: i === p.mediaIdx ? 14 : 5, height: 5, borderRadius: 3, border: "none", background: i === p.mediaIdx ? accent : "rgba(255,255,255,0.3)", cursor: "pointer", transition: "all 0.2s" }} />)}</div>}
+        return <div key={comp.id} style={{ ...style, borderRadius: 8, overflow: "hidden" }}>
+          <MediaGallery
+            media={media} accent={accent}
+            mode={profile.mediaDisplayMode} autoAdvance={profile.mediaAutoAdvance} autoAdvanceSeconds={profile.mediaAutoAdvanceSeconds}
+            activeIdx={p.mediaIdx} onActiveIdxChange={p.setMediaIdx}
+          />
         </div>;
       case "social-links":
         return <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -245,6 +341,13 @@ function LayoutCanvas(p: LayoutProps) {
         </div>;
       case "settings-button":
         return <div key={comp.id} style={style}><button onClick={p.onSettings} style={{ width: "100%", height: "100%", borderRadius: 7, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.12s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = `${accent}44`; e.currentTarget.style.color = accent; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}><Settings size={Math.min(16, comp.w * 0.4)} /></button></div>;
+      case "update-button":
+        return <div key={comp.id} style={style}>
+          <button onClick={onRefresh} disabled={refreshing} title="Check for updates" style={{ width: "100%", height: "100%", borderRadius: 7, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: refreshResult === "updated" ? "#22c55e" : "var(--text-muted)", cursor: refreshing ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontFamily: "'DM Mono',monospace", fontSize: Math.max(9, comp.h * 0.28), fontWeight: 600 }}>
+            <RotateCcw size={Math.min(14, comp.h * 0.4)} style={{ animation: refreshing ? "spin 0.8s linear infinite" : "none", flexShrink: 0 }} />
+            {comp.w > 90 && (refreshing ? "Checking..." : refreshResult === "updated" ? "Updated!" : refreshResult === "current" ? "Up to date" : "Check for Updates")}
+          </button>
+        </div>;
       case "offline-badge":
         return fromCache ? <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center" }}><div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", borderRadius: 99, background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.2)" }}><WifiOff size={9} color="#eab308" /><span style={{ fontSize: "var(--text-2xs)", color: "#eab308", fontFamily: "'DM Mono',monospace" }}>offline</span></div></div> : null;
       case "progress-bar":
@@ -265,7 +368,6 @@ function LayoutCanvas(p: LayoutProps) {
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100vh", background: "var(--bg-base)", overflow: "hidden", fontFamily: "'DM Mono',monospace" }}>
-      {launcherUpdate && !updateDismissed && <div style={{ position: "absolute", top: 10, left: 10, right: 10, zIndex: 99999 }}><UpdateBanner update={launcherUpdate} accent={accent} onDismiss={() => p.setUpdateDismissed(true)} /></div>}
       {sorted.map(comp => renderComponent(comp))}
       <TierWatermark profile={profile} settings={settings} />
     </div>
@@ -276,11 +378,12 @@ function LayoutCanvas(p: LayoutProps) {
 // LAYOUT 1 — CLASSIC
 // ════════════════════════════════════════════════════════════════════════════
 function LayoutClassic(p: LayoutProps) {
-  const { config, fromCache, versions, changelog, media, installing, installed, launching, expanded, mediaIdx, launcherUpdate, updateDismissed } = p;
+  const { config, fromCache, versions, changelog, media, installing, installed, running, launching, expanded, mediaIdx, refreshing, refreshResult, onRefresh } = p;
   const { profile, settings, socials } = config;
   const accent = profile.accentColor;
   const latest = versions[0];
-  const canLaunch = latest && installed[latest.tag] && !launching;
+  const isRunning = !!(latest && running[latest.tag]);
+  const canLaunch = latest && installed[latest.tag] && !launching && !isRunning;
   const SOCIALS = buildSocials(socials);
   const [tab, setTab] = useState<"home" | "versions" | "changelog">("home");
 
@@ -288,17 +391,16 @@ function LayoutClassic(p: LayoutProps) {
     <div style={{ height: "100vh", background: "var(--bg-base)", display: "flex", flexDirection: "column", fontFamily: "'DM Mono',monospace" }}>
       <header style={{ background: "var(--bg-surface)", borderBottom: "1px solid var(--border)", padding: `12px calc(var(--safe-margin) + 10px)`, display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
         <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
-          {profile.logoUrl && <img src={profile.logoUrl} alt="" style={{ width: 30, height: 30, borderRadius: 7, objectFit: "contain", flexShrink: 0 }} onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />}
+          <CachedImage src={profile.logoUrl} style={{ width: 30, height: 30, borderRadius: 7, objectFit: "contain", flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
-            <p style={{ fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: "var(--text-md)", fontWeight: 800, color: "var(--text-primary)", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profile.title}</p>
+            {!profile.hideTitle && <MarqueeText text={profile.title} style={{ fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: "var(--text-md)", fontWeight: 800, color: "var(--text-primary)", lineHeight: 1.2 }} />}
             <p style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", marginTop: 2 }}>by {profile.author} · v{profile.version}</p>
           </div>
         </div>
         {fromCache && <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", borderRadius: 99, background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.2)", flexShrink: 0 }}><WifiOff size={10} color="#eab308" /><span style={{ fontSize: "var(--text-2xs)", color: "#eab308" }}>offline</span></div>}
+        <button onClick={onRefresh} disabled={refreshing} title="Check for updates" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 34, height: 34, borderRadius: 8, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: refreshResult === "updated" ? "#22c55e" : "var(--text-muted)", cursor: refreshing ? "default" : "pointer", flexShrink: 0 }} onMouseEnter={e => { if (!refreshing) { e.currentTarget.style.borderColor = `${accent}44`; e.currentTarget.style.color = accent; } }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = refreshResult === "updated" ? "#22c55e" : "var(--text-muted)"; }}><RotateCcw size={15} style={{ animation: refreshing ? "spin 0.8s linear infinite" : "none" }} /></button>
         <button onClick={p.onSettings} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 34, height: 34, borderRadius: 8, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }} onMouseEnter={e => { e.currentTarget.style.borderColor = `${accent}44`; e.currentTarget.style.color = accent; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}><Settings size={15} /></button>
       </header>
-
-      {launcherUpdate && !updateDismissed && <UpdateBanner update={launcherUpdate} accent={accent} onDismiss={() => p.setUpdateDismissed(true)} />}
 
       <div style={{ display: "flex", gap: 2, padding: `0 calc(var(--safe-margin) + 10px)`, background: "var(--bg-surface)", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
         {(["home", "versions", "changelog"] as const).map(t => (
@@ -314,9 +416,12 @@ function LayoutClassic(p: LayoutProps) {
             {profile.description && <p style={{ fontSize: "var(--text-base)", color: "var(--text-secondary)", lineHeight: 1.7 }}>{profile.description}</p>}
 
             {media.length > 0 && (
-              <div style={{ borderRadius: 10, overflow: "hidden", background: "var(--bg-surface)", border: "1px solid var(--border)", aspectRatio: "16/9", position: "relative" }}>
-                <img src={media[mediaIdx]?.url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />
-                {media.length > 1 && <div style={{ position: "absolute", bottom: 8, left: 0, right: 0, display: "flex", justifyContent: "center", gap: 4 }}>{media.map((_, i) => <button key={i} onClick={() => p.setMediaIdx(i)} style={{ width: i === mediaIdx ? 18 : 6, height: 6, borderRadius: 3, border: "none", background: i === mediaIdx ? accent : "rgba(255,255,255,0.3)", cursor: "pointer", transition: "all 0.2s" }} />)}</div>}
+              <div style={{ borderRadius: 10, overflow: "hidden", background: "var(--bg-surface)", border: "1px solid var(--border)", aspectRatio: "16/9" }}>
+                <MediaGallery
+                  media={media} accent={accent}
+                  mode={profile.mediaDisplayMode} autoAdvance={profile.mediaAutoAdvance} autoAdvanceSeconds={profile.mediaAutoAdvanceSeconds}
+                  activeIdx={mediaIdx} onActiveIdxChange={p.setMediaIdx}
+                />
               </div>
             )}
 
@@ -329,20 +434,27 @@ function LayoutClassic(p: LayoutProps) {
               </div>
             ) : (
               <button
-                onClick={() => canLaunch ? p.onLaunch() : p.onDownload(latest)}
-                disabled={launching}
+                onClick={() => canLaunch ? p.onLaunch() : !isRunning && p.onDownload(latest)}
+                disabled={launching || isRunning}
                 style={{
                   height: 46, borderRadius: 10, border: "none",
-                  background: canLaunch ? accent : `${accent}22`, color: canLaunch ? "#000" : accent,
+                  background: isRunning ? "var(--bg-elevated)" : canLaunch ? accent : `${accent}22`,
+                  color: isRunning ? "var(--text-secondary)" : canLaunch ? "#000" : accent,
                   fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: "var(--text-md)", fontWeight: 700,
-                  cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                  cursor: isRunning ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
                   transition: "transform 0.1s, filter 0.15s",
                 }}
-                onMouseDown={e => { e.currentTarget.style.transform = "scale(0.98)"; }}
+                onMouseDown={e => { if (!isRunning) e.currentTarget.style.transform = "scale(0.98)"; }}
                 onMouseUp={e => { e.currentTarget.style.transform = "scale(1)"; }}
                 onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; }}
               >
-                {launching ? <><Loader size={16} style={{ animation: "spin 0.65s linear infinite" }} /> Launching...</> : canLaunch ? <><Play size={16} fill="currentColor" /> Launch v{latest.tag}</> : <><Download size={15} /> Download v{latest.tag}</>}
+                {launching
+                  ? <><Loader size={16} style={{ animation: "spin 0.65s linear infinite" }} /> Launching...</>
+                  : isRunning
+                  ? <><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e", animation: "pulse 1.4s ease infinite" }} /> Running</>
+                  : canLaunch
+                  ? <><Play size={16} fill="currentColor" /> Launch v{latest.tag}</>
+                  : <><Download size={15} /> Download v{latest.tag}</>}
               </button>
             ))}
 
@@ -380,7 +492,11 @@ function LayoutClassic(p: LayoutProps) {
                     <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
                       {isInst ? (
                         <>
-                          {(settings.allowVersionRollback || isLatest) && <button onClick={() => p.onLaunch(v.tag)} style={{ ...SMALL_BTN, background: `${accent}20`, color: accent, border: `1px solid ${accent}33` }}><Play size={11} fill="currentColor" /> Launch</button>}
+                          {(settings.allowVersionRollback || isLatest) && (
+                            running[v.tag]
+                              ? <span style={{ ...SMALL_BTN, background: "var(--bg-elevated)", color: "var(--text-secondary)", border: "1px solid var(--border)", cursor: "default" }}><span style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", animation: "pulse 1.4s ease infinite" }} /> Running</span>
+                              : <button onClick={() => p.onLaunch(v.tag)} style={{ ...SMALL_BTN, background: `${accent}20`, color: accent, border: `1px solid ${accent}33` }}><Play size={11} fill="currentColor" /> Launch</button>
+                          )}
                           <button onClick={() => p.onDelete(v.tag)} style={{ ...SMALL_BTN, background: "rgba(239,68,68,0.07)", color: "#f87171", border: "1px solid rgba(239,68,68,0.15)" }}><Trash2 size={11} /></button>
                         </>
                       ) : inProg ? (
@@ -417,9 +533,14 @@ function LayoutClassic(p: LayoutProps) {
 // ════════════════════════════════════════════════════════════════════════════
 interface Props {
   config: GameConfig; fromCache?: boolean; onOpenSettings: () => void;
+  // NEW — App.tsx's own `versions` state (the one passed to SettingsScreen)
+  // was never populated by anything — nothing in App.tsx ever fetched it.
+  // HomeScreen does the real fetching; this reports its results upward so
+  // Settings sees real data instead of a permanently empty array.
+  onVersionsUpdate?: (v: GameVersion[]) => void;
 }
 
-export function HomeScreen({ config, fromCache = false, onOpenSettings }: Props) {
+export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersionsUpdate }: Props) {
   const { profile, settings } = config;
   const platform = getCurrentPlatform();
   const prefs    = loadPrefs();
@@ -430,10 +551,27 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings }: Props)
   const [mediaIdx,        setMediaIdx]         = useState(0);
   const [installing,      setInstalling]       = useState<Record<string, DownloadProgress>>({});
   const [installed,       setInstalled]        = useState<Record<string, boolean>>({});
+  const [running,         setRunning]          = useState<Record<string, boolean>>({});
   const [launching,       setLaunching]        = useState(false);
   const [expanded,        setExpanded]         = useState<string | null>(null);
   const [launcherUpdate,  setLauncherUpdate]   = useState<LauncherUpdate | null>(null);
-  const [updateDismissed, setUpdateDismissed]  = useState(false);
+  // NEW — manual "check for updates" (update-button canvas component +
+  // the header icon in the Classic layout). Separate from launcherUpdate
+  // above, which is specifically about the launcher binary itself
+  // (checkForLauncherUpdate/Tauri's updater plugin) — this is about the
+  // game's version/changelog/media data going stale while the launcher is
+  // already open, since that data is otherwise only fetched once on mount.
+  const [refreshing,      setRefreshing]       = useState(false);
+  const [refreshResult,   setRefreshResult]    = useState<"idle" | "updated" | "current">("idle");
+  // NEW — auto-fetch feature. gameUpdateNotice holds the new tag when a
+  // check reveals the latest published version differs from the one this
+  // player last saw (persisted in localStorage — see the effect below), and
+  // drives the modal that replaces the old dismiss-and-forget banner.
+  const [gameUpdateNotice, setGameUpdateNotice] = useState<string | null>(null);
+  // NEW — the version awaiting confirmation in the download modal, or null
+  // when none is pending.
+  const [pendingDownload, setPendingDownload]  = useState<GameVersion | null>(null);
+  const prevRunningRef = useRef<Record<string, boolean>>({});
   const sessionStart = useRef(Date.now());
 
   useEffect(() => {
@@ -459,11 +597,68 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings }: Props)
   }, [profile.fontFamily, profile.customFontUrl]);
 
   useEffect(() => { fetchVersions().then(setVersions); fetchChangelog().then(setChangelog); fetchMedia().then(setMedia); }, []);
+
+  // NEW — auto-fetch, part 1: "instantly after opening it". Compares the
+  // latest published tag against the last one this player actually saw
+  // (persisted per-game in localStorage). Runs whenever `versions` changes
+  // — the initial mount fetch, a manual refresh, or the auto-refresh after
+  // closing the game below — so it uniformly covers "new since I last had
+  // this open" regardless of what triggered the fetch, without popping the
+  // modal for a version the player has already been shown before.
+  useEffect(() => {
+    if (!versions.length) return;
+    const latestTag = versions[0].tag;
+    const key = `deploy_last_seen_version_${GAME_ID}`;
+    const lastSeen = localStorage.getItem(key);
+    if (lastSeen && lastSeen !== latestTag) setGameUpdateNotice(latestTag);
+    localStorage.setItem(key, latestTag);
+  }, [versions]);
+
+  // NEW — auto-fetch, part 2: "after closing the game". Watches for a
+  // tracked version's running state going true -> false (a session that
+  // just ended) and re-checks both the game's version data and the
+  // launcher binary itself right then, rather than waiting for the player
+  // to notice and hit the manual refresh button.
+  useEffect(() => {
+    const prev = prevRunningRef.current;
+    const justStopped = Object.keys(prev).some(tag => prev[tag] && !running[tag]);
+    if (justStopped) {
+      handleRefresh();
+      checkForLauncherUpdate().then(u => { if (u) setLauncherUpdate(u); });
+    }
+    prevRunningRef.current = running;
+  }, [running]);
+
+  // Mirrors versions up to App.tsx whenever it changes (initial load,
+  // manual refresh, or the auto-refresh added below) — see the Props
+  // comment on onVersionsUpdate for why this exists.
+  useEffect(() => { onVersionsUpdate?.(versions); }, [versions, onVersionsUpdate]);
   useEffect(() => { checkForLauncherUpdate().then(u => { if (u) setLauncherUpdate(u); }); }, []);
   useEffect(() => {
     if (!isTauri() || !versions.length) return;
     Promise.all(versions.map(v => getInstalledVersion(GAME_ID, v.tag).then(r => [v.tag, !!r] as const))).then(r => setInstalled(Object.fromEntries(r)));
   }, [versions]);
+
+  // NEW — "Running" button state. Polls is_game_running (real process
+  // tracking on the Rust side, not a guess) for every locally-installed
+  // version every 2s. Only polls installed tags — cheap enough at that
+  // interval and count that per-tag "was this ever launched" bookkeeping
+  // isn't worth the extra complexity.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const installedTags = Object.keys(installed).filter(t => installed[t]);
+    if (installedTags.length === 0) { setRunning({}); return; }
+
+    let cancelled = false;
+    const poll = () => {
+      Promise.all(installedTags.map(t =>
+        isGameRunning(GAME_ID, t).then(r => [t, r] as const).catch(() => [t, false] as const)
+      )).then(results => { if (!cancelled) setRunning(Object.fromEntries(results)); });
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [installed]);
   useEffect(() => {
     const latest = versions[0];
     if (!latest || !settings.autoUpdateOnLaunch || prefs.disableAutoUpdate) return;
@@ -484,7 +679,15 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings }: Props)
         const next = { ...prev, ...updates };
         for (const k of Object.keys(next)) {
           if (next[k].status === "done") { setInstalled(ins => ({ ...ins, [k]: true })); delete next[k]; }
-          else if (next[k].status === "error" || next[k].status === "cancelled") { delete next[k]; }
+          // FIX — "error" used to be deleted here immediately, same as
+          // "cancelled". That meant a failed download or a corrupt/invalid
+          // archive (e.g. a mirror serving an HTML page instead of the real
+          // file) looked identical to nothing having happened — the button
+          // just silently reset with zero feedback. Errors now stay in
+          // state so ProgressBar can show the actual message; the existing
+          // cancel (X) button doubles as the dismiss action. Deliberate
+          // cancellations are unaffected — still cleared right away.
+          else if (next[k].status === "cancelled") { delete next[k]; }
         }
         return next;
       });
@@ -501,7 +704,10 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings }: Props)
     };
   }, []);
 
-  const handleDownload = async (v: GameVersion) => {
+  // NEW — the actual download-starting logic, now only called after
+  // confirmation (see handleDownload below) rather than directly from the
+  // Download button.
+  const startDownloadFlow = async (v: GameVersion) => {
     const mirrors = v[platform];
     if (!mirrors.length) return;
 
@@ -528,20 +734,121 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings }: Props)
     });
   };
 
+  // NEW — confirmation gate. Shows a modal before every download unless
+  // the player has previously ticked "don't ask again" (persisted in the
+  // same PlayerPrefs SettingsScreen already reads/writes).
+  const handleDownload = (v: GameVersion) => {
+    if (loadPrefs().skipDownloadConfirm) { startDownloadFlow(v); return; }
+    setPendingDownload(v);
+  };
+
   const handleCancel = async (tag: string) => { await cancelDownload(GAME_ID, tag).catch(console.error); setInstalling(prev => { const n = { ...prev }; delete n[tag]; return n; }); };
   const handleDelete = async (tag: string) => { await deleteVersion(GAME_ID, tag).catch(console.error); setInstalled(prev => ({ ...prev, [tag]: false })); };
-  const handleLaunch = async (tag?: string) => { const t = tag ?? versions[0]?.tag; if (!t) return; setLaunching(true); await launchGame(GAME_ID, t).catch(console.error); setTimeout(() => setLaunching(false), 3000); };
+
+  // NEW — manual refresh. versions/changelog/media are otherwise only
+  // fetched once on mount (see the useEffect above), so a player who has
+  // the launcher open when a dev publishes a new version wouldn't see it
+  // without restarting the app. Compares the latest tag before and after
+  // to report whether anything actually changed.
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    setRefreshResult("idle");
+    const prevLatestTag = versions[0]?.tag;
+    try {
+      const [freshVersions] = await Promise.all([
+        fetchVersions(),
+        fetchChangelog().then(setChangelog).catch(() => {}),
+        fetchMedia().then(setMedia).catch(() => {}),
+      ]);
+      setVersions(freshVersions);
+      setRefreshResult(freshVersions[0]?.tag && freshVersions[0].tag !== prevLatestTag ? "updated" : "current");
+    } catch (e) {
+      console.error("[HomeScreen] refresh failed:", e);
+    } finally {
+      setRefreshing(false);
+      setTimeout(() => setRefreshResult("idle"), 4000);
+    }
+  };
+  // FIX — previously always called launchGame with no exeName, so it
+  // relied 100% on Rust's find_executable auto-detection. GameVersion now
+  // carries an optional dev-configured executable name per platform (set
+  // in the dashboard's Builds & Versions section) — look it up and pass it
+  // through when present; falls back to auto-detect exactly as before when
+  // the dev hasn't set one for this version.
+  const handleLaunch = async (tag?: string) => {
+    const t = tag ?? versions[0]?.tag;
+    if (!t) return;
+    const v = versions.find(ver => ver.tag === t);
+    const exeName = platform === "windows" ? v?.windowsExeName
+      : platform === "mac"   ? v?.macExeName
+      : platform === "linux" ? v?.linuxExeName
+      : undefined;
+    setLaunching(true);
+    try {
+      await launchGame(GAME_ID, t, exeName);
+      // Optimistic — the real poll (every 2s) will confirm/correct this,
+      // but without it there'd be a gap between the 3s "Launching..."
+      // window ending and the next poll tick where the button could flash
+      // back to "Launch" even though the game did start successfully.
+      setRunning(prev => ({ ...prev, [t]: true }));
+    } catch (e) {
+      console.error(e);
+    }
+    setTimeout(() => setLaunching(false), 3000);
+  };
 
   const layoutProps: LayoutProps = {
     config, fromCache, platform, versions, changelog, media,
-    installing, installed, launching, expanded, mediaIdx,
-    launcherUpdate, updateDismissed,
+    installing, installed, running, launching, expanded, mediaIdx,
+    refreshing, refreshResult, onRefresh: handleRefresh,
     onDownload: handleDownload, onCancel: handleCancel,
     onDelete: handleDelete, onLaunch: handleLaunch,
     onSettings: onOpenSettings,
-    setExpanded, setMediaIdx, setUpdateDismissed,
+    setExpanded, setMediaIdx,
   };
 
-  if (profile.canvasLayout?.length) return <LayoutCanvas {...layoutProps} />;
-  return <LayoutClassic {...layoutProps} />;
+  return (
+    <>
+      {profile.canvasLayout?.length ? <LayoutCanvas {...layoutProps} /> : <LayoutClassic {...layoutProps} />}
+
+      {launcherUpdate && (
+        <UpdateBanner update={launcherUpdate} accent={profile.accentColor} onDismiss={() => setLauncherUpdate(null)} />
+      )}
+
+      {pendingDownload && (
+        <DownloadConfirmModal
+          version={pendingDownload}
+          title={profile.title}
+          accent={profile.accentColor}
+          onConfirm={() => { const v = pendingDownload; setPendingDownload(null); startDownloadFlow(v); }}
+          onCancel={() => setPendingDownload(null)}
+        />
+      )}
+
+      {/* NEW — game version update notice. See the last-seen-version effect
+          above for when this actually fires. Intentionally only informs —
+          closing it returns to the normal screen where Download goes
+          through the confirmation modal like any other download, rather
+          than this modal auto-starting one itself. */}
+      {gameUpdateNotice && (
+        <Modal onClose={() => setGameUpdateNotice(null)}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+            <Sparkles size={26} color={profile.accentColor} style={{ flexShrink: 0 }} />
+            <div style={{ minWidth: 0 }}>
+              <p style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "var(--text-md)", color: "var(--text-primary)" }}>New version available</p>
+              <p style={{ fontFamily: "'DM Mono',monospace", fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>v{gameUpdateNotice}</p>
+            </div>
+          </div>
+          {changelog[0]?.body && (
+            <p style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", lineHeight: 1.55, marginBottom: 18, maxHeight: 140, overflowY: "auto" }}>
+              {changelog[0].body}
+            </p>
+          )}
+          <button onClick={() => setGameUpdateNotice(null)} style={{ width: "100%", padding: "10px 0", borderRadius: 8, border: "none", background: profile.accentColor, color: "#000", fontFamily: "'Syne',sans-serif", fontSize: "var(--text-sm)", fontWeight: 700, cursor: "pointer" }}>
+            Got it
+          </button>
+        </Modal>
+      )}
+    </>
+  );
 }

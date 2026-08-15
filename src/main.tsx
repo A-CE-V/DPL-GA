@@ -29,23 +29,40 @@ function App() {
 
   if (!config) return null;
 
-  if (screen === "settings") {
-    return (
-      <SettingsScreen
-        config={config}
-        versions={versions}
-        fromCache={fromCache}
-        onBack={() => setScreen("home")}
-      />
-    );
-  }
-
+  // FIX — this used to be `if (screen === "settings") return <SettingsScreen/>;
+  // return <HomeScreen/>;` — a conditional return, which fully unmounts
+  // whichever screen isn't active and mounts the other fresh. Every time a
+  // player opened Settings and came back, HomeScreen remounted from
+  // scratch: installed/installing/running all reset to empty, and there
+  // was a real window — while the fresh getInstalledVersion checks were
+  // still in flight — where an already-installed game briefly showed the
+  // Download button instead of Launch. Clicking during that window kicked
+  // off a redundant full re-download over an install that was already
+  // there. Both screens now stay mounted permanently once reached; the
+  // inactive one is hidden via CSS (display: contents on the active
+  // wrapper keeps it fully transparent to layout) rather than destroyed.
+  // This also means HomeScreen's running-process poll keeps working while
+  // Settings is open, which the auto-refresh-after-game-closes feature
+  // depends on.
   return (
-    <HomeScreen
-      config={config}
-      fromCache={fromCache}
-      onOpenSettings={() => setScreen("settings")}
-    />
+    <>
+      <div style={{ display: screen === "home" ? "contents" : "none" }}>
+        <HomeScreen
+          config={config}
+          fromCache={fromCache}
+          onOpenSettings={() => setScreen("settings")}
+          onVersionsUpdate={setVersions}
+        />
+      </div>
+      <div style={{ display: screen === "settings" ? "contents" : "none" }}>
+        <SettingsScreen
+          config={config}
+          versions={versions}
+          fromCache={fromCache}
+          onBack={() => setScreen("home")}
+        />
+      </div>
+    </>
   );
 }
 

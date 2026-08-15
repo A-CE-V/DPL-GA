@@ -9,7 +9,12 @@ export interface DownloadProgress {
   // side now reports (see download.rs), previously undeclared here meaning
   // the UI had no way to distinguish "resuming a partial download" or
   // "checksum verification in progress" from plain "downloading".
-  status:      "downloading" | "resuming" | "verifying" | "extracting" | "done" | "error" | "cancelled";
+  // FIX — added "starting" too: set synchronously in handleDownload for
+  // instant click feedback and checked in ProgressBar's isIndeterminate,
+  // but never actually declared here, which is why plain `tsc --noEmit`
+  // flagged both of those as comparisons "with no overlap" even though the
+  // runtime behavior was already correct.
+  status:      "starting" | "downloading" | "resuming" | "verifying" | "extracting" | "done" | "error" | "cancelled";
   error?:      string;
 }
 
@@ -56,11 +61,32 @@ export const checkUrl = (url: string) =>
 export const launchGame = (gameId: string, version: string, exeName?: string) =>
   invoke<void>("launch_game", { gameId, version, exeName: exeName ?? null });
 
+// NEW — reports whether the process launched for this game+version is still
+// alive. Backed by real process tracking on the Rust side (see
+// ProcessState in launch.rs) — not a guess.
+export const isGameRunning = (gameId: string, version: string) =>
+  invoke<boolean>("is_game_running", { gameId, version });
+
 export const getInstalledVersion = (gameId: string, version: string) =>
   invoke<InstalledVersion | null>("get_installed_version", { gameId, version });
 
 export const deleteVersion = (gameId: string, version: string) =>
   invoke<void>("delete_version", { gameId, version });
+
+// NEW — opens the OS file explorer at an installed version's directory.
+export const openInstallFolder = (gameId: string, version: string) =>
+  invoke<void>("open_install_folder", { gameId, version });
+
+// ─── Media ───────────────────────────────────────────────────────────────────
+// NEW — fetches (once) and caches an image URL to disk, returning it as a
+// base64 data URL. Every later call for the same URL is served straight off
+// disk with no network request. See CachedImage.tsx for the component that
+// wraps this.
+export const getCachedImage = (url: string) =>
+  invoke<string>("get_cached_image", { url });
+
+export const clearImageCache = () =>
+  invoke<void>("clear_image_cache");
 
 // ─── System ──────────────────────────────────────────────────────────────────
 export const getSystemInfo = () =>

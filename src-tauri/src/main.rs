@@ -3,7 +3,7 @@
 
 mod commands;
 
-use commands::{download, launch, system_info, mac_ban};
+use commands::{download, launch, media, system_info, mac_ban};
 
 fn main() {
     tauri::Builder::default()
@@ -27,14 +27,23 @@ fn main() {
         // behind "I can't even download the game."
         // ═══════════════════════════════════════════════════════════════════
         .manage(download::DownloadState::default())
+        // NEW — same pattern, for launch_game/is_game_running's process
+        // tracking. Registered here up front specifically because of the
+        // lesson above: a command taking State<'_, T> without a matching
+        // .manage(T::default()) call fails at runtime, not compile time.
+        .manage(launch::ProcessState::default())
         .invoke_handler(tauri::generate_handler![
             download::download_build,
             download::get_download_progress,
             download::cancel_download,
             download::check_url_availability,
             launch::launch_game,
+            launch::is_game_running,
             launch::get_installed_version,
             launch::delete_version,
+            launch::open_install_folder,
+            media::get_cached_image,
+            media::clear_image_cache,
             system_info::get_system_info,
             mac_ban::get_mac_address_cmd,
         ])
