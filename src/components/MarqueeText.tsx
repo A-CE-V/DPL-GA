@@ -15,11 +15,15 @@
 import { useState, useEffect, useRef } from "react";
 
 export function MarqueeText({
-  text, style, speed = 40,
+  text, style, speed = 40, align = "left",
 }: {
   text:   string;
   style?: React.CSSProperties;
   speed?: number; // px/sec
+  // NEW — only affects the static (non-overflowing) branch. Once the text
+  // is actually scrolling, it already spans the full width on a loop —
+  // left/center/right has no meaningful effect on a marquee mid-scroll.
+  align?: "left" | "center" | "right";
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const measureRef   = useRef<HTMLSpanElement>(null);
@@ -42,7 +46,7 @@ export function MarqueeText({
   }, [text, speed]);
 
   return (
-    <div ref={containerRef} style={{ overflow: "hidden", whiteSpace: "nowrap", position: "relative", ...style }}>
+    <div ref={containerRef} style={{ overflow: "hidden", whiteSpace: "nowrap", position: "relative", width: "100%", ...style }}>
       {/* Hidden measuring copy */}
       <span ref={measureRef} style={{ position: "absolute", visibility: "hidden", whiteSpace: "nowrap", left: 0, top: 0 }}>
         {text}
@@ -54,7 +58,7 @@ export function MarqueeText({
           <span aria-hidden style={{ whiteSpace: "nowrap", paddingRight: 48 }}>{text}</span>
         </div>
       ) : (
-        <span style={{ display: "block", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        <span style={{ display: "block", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textAlign: align }}>
           {text}
         </span>
       )}

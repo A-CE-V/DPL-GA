@@ -108,6 +108,17 @@ export interface CanvasComponent {
   essential: boolean;
   htmlContent?: string;
   htmlLabel?:   string;
+  // NEW — see the dashboard's copy of this type for the full explanation.
+  styleConfig?: {
+    infoDisplay?:    ("version" | "build-info")[];
+    loadingStyle?:   "default" | "diagonal";
+    runningStyle?:   "default" | "solid" | "pulse-ring";
+    inlineRefresh?:  boolean;
+    refreshVariant?: "default" | "circular";
+  };
+  // NEW — see the dashboard's copy of this type for the full explanation.
+  align?: "left" | "center" | "right";
+  imageUrl?: string;
 }
 
 export interface GameMedia {

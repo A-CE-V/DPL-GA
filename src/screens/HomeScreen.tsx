@@ -14,7 +14,8 @@ import {
   getInstalledVersion, deleteVersion, checkUrl, isTauri,
   type DownloadProgress,
 } from "../lib/ipc";
-import { fetchVersions, fetchChangelog, fetchMedia, GAME_ID, logSession } from "../lib/firebase";
+import { fetchVersions, fetchChangelog, fetchMedia, fetchGameConfig, GAME_ID, logSession } from "../lib/firebase";
+import { applyProfileTheme } from "../lib/themes";
 import { checkForLauncherUpdate, type LauncherUpdate } from "../lib/updater";
 import { loadPrefs, savePrefs } from "./SettingsScreen";
 import { Watermark } from "../components/Watermark";
@@ -116,6 +117,163 @@ function ProgressBar({ progress, accent }: { progress: DownloadProgress & { stat
           animation: isIndeterminate ? "shimmer 1.1s ease infinite" : "none",
         }} />
       </div>
+    </div>
+  );
+}
+
+// ─── Style variants (launch-button, update-button) ─────────────────────────
+// See CanvasComponent.styleConfig in types/index.ts. Only meaningful for
+// the Canvas Editor's launch-button/update-button components — the
+// Classic layout's hero button and header refresh icon are hardcoded, not
+// backed by a CanvasComponent, so there's nothing per-instance to
+// configure there.
+function DiagonalLoadingOverlay({ accent }: { accent: string }) {
+  return (
+    <div style={{
+      position: "absolute", inset: 0, pointerEvents: "none", borderRadius: 8,
+      background: `repeating-linear-gradient(45deg, ${accent}22, ${accent}22 8px, transparent 8px, transparent 18px)`,
+      backgroundSize: "200% 200%",
+      animation: "diagonal-loading 0.9s linear infinite",
+    }} />
+  );
+}
+
+function PulseRingOverlay({ accent }: { accent: string }) {
+  return (
+    <div style={{
+      position: "absolute", inset: 0, borderRadius: 8, pointerEvents: "none",
+      border: `2px solid ${accent}`, animation: "pulse-ring-expand 1.6s ease-out infinite",
+    }} />
+  );
+}
+
+function BuildInfoRow({ version }: { version: GameVersion }) {
+  return (
+    <div style={{ height: 20, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 9, fontFamily: "'DM Mono',monospace", color: "var(--text-faint)", flexShrink: 0 }}>
+      <span>v{version.tag}</span><span style={{ opacity: 0.5 }}>·</span><span>{version.date}</span>
+    </div>
+  );
+}
+
+function runningButtonStyle(runningStyle: string, accent: string): { bg: string; color: string } {
+  if (runningStyle === "solid") return { bg: accent, color: "#000" };
+  return { bg: "var(--bg-elevated)", color: "var(--text-secondary)" };
+}
+
+function RunningLabel({ runningStyle }: { runningStyle: string }) {
+  const dotColor = runningStyle === "solid" ? "rgba(0,0,0,0.6)" : "#22c55e";
+  return <><span style={{ width: 7, height: 7, borderRadius: "50%", background: dotColor, animation: "pulse 1.4s ease infinite", flexShrink: 0 }} /> Running</>;
+}
+
+// NEW — launch-button style variants. Info-display options (version badge,
+// build-info row, inline refresh) are combinable — comp.styleConfig.
+// infoDisplay is an array, any subset can be on at once. Loading/running
+// styles are single-select since they represent one visual state, not
+// things to stack.
+function LaunchButtonComponent({
+  comp, style, latest, dl, canLaunch, isRunning, launching, accent,
+  onLaunch, onDownload, onCancel, onRefresh,
+}: {
+  comp: CanvasComponent; style: React.CSSProperties;
+  latest: GameVersion | undefined; dl: (DownloadProgress & { status: string }) | undefined;
+  canLaunch: boolean; isRunning: boolean; launching: boolean; accent: string;
+  onLaunch: () => void; onDownload: () => void; onCancel: () => void; onRefresh: () => void;
+}) {
+  const sc            = comp.styleConfig ?? {};
+  const showVersion    = !!sc.infoDisplay?.includes("version");
+  const showBuildInfo  = !!sc.infoDisplay?.includes("build-info");
+  const loadingStyle   = sc.loadingStyle ?? "default";
+  const runningStyle   = sc.runningStyle ?? "default";
+  const buttonH        = showBuildInfo ? "calc(100% - 22px)" : "100%";
+
+  if (dl) {
+    return (
+      <div style={{ ...style, display: "flex", flexDirection: "column", gap: 2 }}>
+        <div style={{ width: "100%", height: buttonH, background: "var(--bg-surface)", borderRadius: 8, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", gap: 6, position: "relative", overflow: "hidden" }}>
+          {loadingStyle === "diagonal" && <DiagonalLoadingOverlay accent={accent} />}
+          <div style={{ position: "relative", zIndex: 1, display: "flex", justifyContent: "flex-end" }}>
+            <button onClick={onCancel} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex" }}><X size={11} /></button>
+          </div>
+          <div style={{ position: "relative", zIndex: 1 }}><ProgressBar progress={dl} accent={accent} /></div>
+        </div>
+        {showBuildInfo && latest && <BuildInfoRow version={latest} />}
+      </div>
+    );
+  }
+
+  const running = runningButtonStyle(runningStyle, accent);
+
+  return (
+    <div style={{ ...style, display: "flex", flexDirection: "column", gap: 2, position: "relative" }}>
+      <button
+        onClick={() => canLaunch ? onLaunch() : !isRunning && onDownload()}
+        disabled={launching || isRunning}
+        style={{
+          width: "100%", height: buttonH, borderRadius: 8, border: "none",
+          background: isRunning ? running.bg : canLaunch ? accent : `${accent}22`,
+          color: isRunning ? running.color : canLaunch ? "#000" : accent,
+          fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: Math.max(12, comp.h * 0.3), fontWeight: 800,
+          cursor: isRunning ? "default" : "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          position: "relative", overflow: "hidden",
+        }}
+      >
+        {isRunning && runningStyle === "pulse-ring" && <PulseRingOverlay accent={accent} />}
+        {launching
+          ? "Launching..."
+          : isRunning
+          ? <RunningLabel runningStyle={runningStyle} />
+          : canLaunch
+          ? <><Play size={Math.min(18, comp.h * 0.35)} fill="currentColor" /> Launch{showVersion && latest ? ` v${latest.tag}` : ""}</>
+          : <><Download size={Math.min(16, comp.h * 0.3)} /> Download</>}
+      </button>
+      {sc.inlineRefresh && !isRunning && !launching && (
+        <button
+          onClick={e => { e.stopPropagation(); onRefresh(); }}
+          title="Check for updates"
+          style={{ position: "absolute", top: 4, right: 4, width: 18, height: 18, borderRadius: "50%", border: "none", background: "rgba(0,0,0,0.35)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 2 }}
+        >
+          <RotateCcw size={9} />
+        </button>
+      )}
+      {showBuildInfo && latest && <BuildInfoRow version={latest} />}
+    </div>
+  );
+}
+
+// NEW — update-button style variants. Just one axis (appearance), so a
+// simple switch rather than needing its own styleConfig sub-shape.
+function RefreshButtonComponent({
+  comp, style, refreshing, refreshResult, onRefresh,
+}: {
+  comp: CanvasComponent; style: React.CSSProperties;
+  refreshing: boolean; refreshResult: "idle" | "updated" | "current"; onRefresh: () => void;
+}) {
+  const variant = comp.styleConfig?.refreshVariant ?? "default";
+
+  if (variant === "circular") {
+    // FIX — this used to stretch to comp.w × comp.h with border-radius:
+    // 50%, which renders as an oval (not a circle) whenever the dev's box
+    // isn't square. Sized to the smaller dimension instead and positioned
+    // within the box via align, so "simple circular refresh button"
+    // actually looks like a circle regardless of the box's aspect ratio.
+    const size = Math.min(comp.w, comp.h);
+    const justify = comp.align === "center" ? "center" : comp.align === "right" ? "flex-end" : "flex-start";
+    return (
+      <div style={{ ...style, display: "flex", alignItems: "center", justifyContent: justify }}>
+        <button onClick={onRefresh} disabled={refreshing} title="Check for updates" style={{ width: size, height: size, flexShrink: 0, borderRadius: "50%", background: "var(--bg-elevated)", border: "1px solid var(--border)", color: refreshResult === "updated" ? "#22c55e" : "var(--text-muted)", cursor: refreshing ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <RotateCcw size={Math.min(16, size * 0.45)} style={{ animation: refreshing ? "spin 0.8s linear infinite" : "none" }} />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={style}>
+      <button onClick={onRefresh} disabled={refreshing} title="Check for updates" style={{ width: "100%", height: "100%", borderRadius: 7, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: refreshResult === "updated" ? "#22c55e" : "var(--text-muted)", cursor: refreshing ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontFamily: "'DM Mono',monospace", fontSize: Math.max(9, comp.h * 0.28), fontWeight: 600 }}>
+        <RotateCcw size={Math.min(14, comp.h * 0.4)} style={{ animation: refreshing ? "spin 0.8s linear infinite" : "none", flexShrink: 0 }} />
+        {comp.w > 90 && (refreshing ? "Checking..." : refreshResult === "updated" ? "Updated!" : refreshResult === "current" ? "Up to date" : "Check for Updates")}
+      </button>
     </div>
   );
 }
@@ -300,6 +458,11 @@ function LayoutCanvas(p: LayoutProps) {
   const layout  = (profile.canvasLayout ?? []).map(c => clampToSafeArea(c, CANVAS_W, CANVAS_H));
   const sorted  = [...layout].sort((a, b) => a.zIndex - b.zIndex);
 
+  // NEW — align: "left"|"center"|"right" -> flex justify-content, for the
+  // component types where content doesn't already fill the box.
+  const justifyFor = (comp: CanvasComponent): "flex-start" | "center" | "flex-end" =>
+    comp.align === "center" ? "center" : comp.align === "right" ? "flex-end" : "flex-start";
+
   const renderComponent = (comp: CanvasComponent) => {
     const style: React.CSSProperties = { position: "absolute", left: comp.x, top: comp.y, width: comp.w, height: comp.h, zIndex: comp.zIndex, overflow: "hidden" };
     switch (comp.type) {
@@ -307,26 +470,26 @@ function LayoutCanvas(p: LayoutProps) {
         // NEW — hideTitle lets a dev rely on their logo instead; skip
         // rendering entirely rather than an empty box taking up space.
         if (profile.hideTitle) return null;
-        return <div key={comp.id} style={style}><MarqueeText text={profile.title} style={{ fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: Math.max(14, comp.h * 0.55), fontWeight: 900, color: "var(--text-primary)", letterSpacing: "-0.02em", lineHeight: 1 }} /></div>;
+        return <div key={comp.id} style={style}><MarqueeText text={profile.title} align={comp.align} style={{ fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: Math.max(14, comp.h * 0.55), fontWeight: 900, color: "var(--text-primary)", letterSpacing: "-0.02em", lineHeight: 1 }} /></div>;
       case "author-label":
-        return <div key={comp.id} style={style}><p style={{ fontFamily: "'DM Mono',monospace", fontSize: Math.max(10, comp.h * 0.45), color: "var(--text-muted)" }}>by {profile.author} · v{profile.version}</p></div>;
+        return <div key={comp.id} style={style}><p style={{ fontFamily: "'DM Mono',monospace", fontSize: Math.max(10, comp.h * 0.45), color: "var(--text-muted)", width: "100%", textAlign: comp.align ?? "left" }}>by {profile.author} · v{profile.version}</p></div>;
       case "game-description":
-        return <div key={comp.id} style={{ ...style, overflowY: "auto" }}><p style={{ fontFamily: "'DM Mono',monospace", fontSize: "var(--text-sm)", color: "var(--text-secondary)", lineHeight: 1.7 }}>{profile.description}</p></div>;
+        return <div key={comp.id} style={{ ...style, overflowY: "auto" }}><p style={{ fontFamily: "'DM Mono',monospace", fontSize: "var(--text-sm)", color: "var(--text-secondary)", lineHeight: 1.7, textAlign: comp.align ?? "left" }}>{profile.description}</p></div>;
       case "launch-button": {
         const dl = latest && installing[latest.tag];
-        return <div key={comp.id} style={style}>{dl ? (
-          <div style={{ width: "100%", height: "100%", background: "var(--bg-surface)", borderRadius: 8, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", gap: 6 }}>
-            <div style={{ display: "flex", justifyContent: "flex-end" }}><button onClick={() => latest && p.onCancel(latest.tag)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex" }}><X size={11} /></button></div>
-            {latest && <ProgressBar progress={dl} accent={accent} />}
-          </div>
-        ) : (
-          <button onClick={() => canLaunch ? p.onLaunch() : !isRunning && latest && p.onDownload(latest)} disabled={launching || isRunning} style={{ width: "100%", height: "100%", borderRadius: 8, border: "none", background: isRunning ? "var(--bg-elevated)" : canLaunch ? accent : `${accent}22`, color: isRunning ? "var(--text-secondary)" : canLaunch ? "#000" : accent, fontFamily: "var(--launcher-font,'Syne',sans-serif)", fontSize: Math.max(12, comp.h * 0.3), fontWeight: 800, cursor: isRunning ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-            {launching ? "Launching..." : isRunning ? <><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", animation: "pulse 1.4s ease infinite" }} /> Running</> : canLaunch ? <><Play size={Math.min(18, comp.h * 0.35)} fill="currentColor" /> Launch</> : <><Download size={Math.min(16, comp.h * 0.3)} /> Download</>}
-          </button>
-        )}</div>;
+        return (
+          <LaunchButtonComponent
+            key={comp.id} comp={comp} style={style}
+            latest={latest} dl={dl} canLaunch={!!canLaunch} isRunning={isRunning} launching={launching} accent={accent}
+            onLaunch={() => p.onLaunch()}
+            onDownload={() => latest && p.onDownload(latest)}
+            onCancel={() => latest && p.onCancel(latest.tag)}
+            onRefresh={onRefresh}
+          />
+        );
       }
       case "version-badge":
-        return latest ? <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center" }}><span style={{ fontSize: "var(--text-2xs)", padding: "3px 10px", borderRadius: 99, background: `${accent}18`, color: accent, fontFamily: "'DM Mono',monospace", fontWeight: 700, border: `1px solid ${accent}33`, whiteSpace: "nowrap" }}>{latest.status === "stable" ? <Check size={9} style={{ display: "inline", verticalAlign: "-1px" }} /> : <AlertTriangle size={9} style={{ display: "inline", verticalAlign: "-1px" }} />} v{latest.tag}</span></div> : null;
+        return latest ? <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center", justifyContent: justifyFor(comp) }}><span style={{ fontSize: "var(--text-2xs)", padding: "3px 10px", borderRadius: 99, background: `${accent}18`, color: accent, fontFamily: "'DM Mono',monospace", fontWeight: 700, border: `1px solid ${accent}33`, whiteSpace: "nowrap" }}>{latest.status === "stable" ? <Check size={9} style={{ display: "inline", verticalAlign: "-1px" }} /> : <AlertTriangle size={9} style={{ display: "inline", verticalAlign: "-1px" }} />} v{latest.tag}</span></div> : null;
       case "media-carousel":
         return <div key={comp.id} style={{ ...style, borderRadius: 8, overflow: "hidden" }}>
           <MediaGallery
@@ -336,20 +499,20 @@ function LayoutCanvas(p: LayoutProps) {
           />
         </div>;
       case "social-links":
-        return <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        return <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center", justifyContent: justifyFor(comp), gap: 6, flexWrap: "wrap" }}>
           {SOCIALS.map(({ key, url, Icon, label }) => <a key={key} href={url} target="_blank" rel="noopener noreferrer" title={label} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: Math.min(30, comp.h * 0.8), height: Math.min(30, comp.h * 0.8), borderRadius: 7, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: "var(--text-muted)", textDecoration: "none", transition: "all 0.12s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = `${accent}44`; e.currentTarget.style.color = accent; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}><Icon size={12} /></a>)}
         </div>;
       case "settings-button":
         return <div key={comp.id} style={style}><button onClick={p.onSettings} style={{ width: "100%", height: "100%", borderRadius: 7, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.12s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = `${accent}44`; e.currentTarget.style.color = accent; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}><Settings size={Math.min(16, comp.w * 0.4)} /></button></div>;
       case "update-button":
-        return <div key={comp.id} style={style}>
-          <button onClick={onRefresh} disabled={refreshing} title="Check for updates" style={{ width: "100%", height: "100%", borderRadius: 7, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: refreshResult === "updated" ? "#22c55e" : "var(--text-muted)", cursor: refreshing ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontFamily: "'DM Mono',monospace", fontSize: Math.max(9, comp.h * 0.28), fontWeight: 600 }}>
-            <RotateCcw size={Math.min(14, comp.h * 0.4)} style={{ animation: refreshing ? "spin 0.8s linear infinite" : "none", flexShrink: 0 }} />
-            {comp.w > 90 && (refreshing ? "Checking..." : refreshResult === "updated" ? "Updated!" : refreshResult === "current" ? "Up to date" : "Check for Updates")}
-          </button>
-        </div>;
+        return (
+          <RefreshButtonComponent
+            key={comp.id} comp={comp} style={style}
+            refreshing={refreshing} refreshResult={refreshResult} onRefresh={onRefresh}
+          />
+        );
       case "offline-badge":
-        return fromCache ? <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center" }}><div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", borderRadius: 99, background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.2)" }}><WifiOff size={9} color="#eab308" /><span style={{ fontSize: "var(--text-2xs)", color: "#eab308", fontFamily: "'DM Mono',monospace" }}>offline</span></div></div> : null;
+        return fromCache ? <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center", justifyContent: justifyFor(comp) }}><div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", borderRadius: 99, background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.2)" }}><WifiOff size={9} color="#eab308" /><span style={{ fontSize: "var(--text-2xs)", color: "#eab308", fontFamily: "'DM Mono',monospace" }}>offline</span></div></div> : null;
       case "progress-bar":
         return latest && installing[latest.tag] ? <div key={comp.id} style={{ ...style, background: "var(--bg-surface)", borderRadius: 8, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", gap: 6 }}><div style={{ display: "flex", justifyContent: "flex-end" }}><button onClick={() => p.onCancel(latest.tag)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex" }}><X size={11} /></button></div><ProgressBar progress={installing[latest.tag]} accent={accent} /></div> : null;
       case "changelog":
@@ -361,13 +524,17 @@ function LayoutCanvas(p: LayoutProps) {
         return <div key={comp.id} style={style}><div style={{ width: "100%", height: 1, background: "var(--border)" }} /></div>;
       case "spacer":
         return <div key={comp.id} style={style} />;
+      case "custom-image":
+        return <div key={comp.id} style={{ ...style, borderRadius: 6, overflow: "hidden" }}>
+          <CachedImage src={comp.imageUrl} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        </div>;
       default:
         return null;
     }
   };
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100vh", background: "var(--bg-base)", overflow: "hidden", fontFamily: "'DM Mono',monospace" }}>
+    <div style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-base)", overflow: "hidden", fontFamily: "'DM Mono',monospace" }}>
       {sorted.map(comp => renderComponent(comp))}
       <TierWatermark profile={profile} settings={settings} />
     </div>
@@ -388,7 +555,7 @@ function LayoutClassic(p: LayoutProps) {
   const [tab, setTab] = useState<"home" | "versions" | "changelog">("home");
 
   return (
-    <div style={{ height: "100vh", background: "var(--bg-base)", display: "flex", flexDirection: "column", fontFamily: "'DM Mono',monospace" }}>
+    <div style={{ height: "100%", background: "var(--bg-base)", display: "flex", flexDirection: "column", fontFamily: "'DM Mono',monospace" }}>
       <header style={{ background: "var(--bg-surface)", borderBottom: "1px solid var(--border)", padding: `12px calc(var(--safe-margin) + 10px)`, display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
         <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
           <CachedImage src={profile.logoUrl} style={{ width: 30, height: 30, borderRadius: 7, objectFit: "contain", flexShrink: 0 }} />
@@ -538,9 +705,15 @@ interface Props {
   // HomeScreen does the real fetching; this reports its results upward so
   // Settings sees real data instead of a permanently empty array.
   onVersionsUpdate?: (v: GameVersion[]) => void;
+  // NEW — reports a freshly re-fetched config upward so App.tsx's own copy
+  // (the `config` this very prop comes from) stays in sync too. Without
+  // this, only this component's own render would reflect a refreshed
+  // theme/profile — App would keep handing the stale one back down on its
+  // next re-render.
+  onConfigUpdate?: (c: GameConfig) => void;
 }
 
-export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersionsUpdate }: Props) {
+export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersionsUpdate, onConfigUpdate }: Props) {
   const { profile, settings } = config;
   const platform = getCurrentPlatform();
   const prefs    = loadPrefs();
@@ -755,13 +928,25 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersio
     setRefreshResult("idle");
     const prevLatestTag = versions[0]?.tag;
     try {
-      const [freshVersions] = await Promise.all([
+      const [freshVersions, freshConfig] = await Promise.all([
         fetchVersions(),
+        fetchGameConfig(),
         fetchChangelog().then(setChangelog).catch(() => {}),
         fetchMedia().then(setMedia).catch(() => {}),
       ]);
       setVersions(freshVersions);
       setRefreshResult(freshVersions[0]?.tag && freshVersions[0].tag !== prevLatestTag ? "updated" : "current");
+      // NEW — this used to only refresh versions/changelog/media. Theme,
+      // gallery display mode, title visibility, and every other
+      // profile-level dashboard setting lives on `config`, which nothing
+      // here ever re-fetched — so those changes only ever showed up after
+      // a full app restart, never via this refresh (manual or the
+      // auto-trigger after closing the game). Re-applies the theme
+      // immediately so a color change is visible without restarting.
+      if (freshConfig) {
+        applyProfileTheme(freshConfig.profile);
+        onConfigUpdate?.(freshConfig);
+      }
     } catch (e) {
       console.error("[HomeScreen] refresh failed:", e);
     } finally {
