@@ -240,7 +240,7 @@ export function SettingsScreen({ config, versions, onBack, fromCache = false }: 
     // the new .dl-scroll-region utility class.
     // ═══════════════════════════════════════════════════════════════════════
     <div style={{
-      height: "100vh",
+      height: "100%",
       background: "var(--bg-base)",
       color: "var(--text-primary)",
       fontFamily: "'DM Mono',monospace",

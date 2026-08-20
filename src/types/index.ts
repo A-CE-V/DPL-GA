@@ -115,6 +115,8 @@ export interface CanvasComponent {
     runningStyle?:   "default" | "solid" | "pulse-ring";
     inlineRefresh?:  boolean;
     refreshVariant?: "default" | "circular";
+    changelogVariant?: "default" | "dropdown-modal";
+    readMoreUrl?:      string;
   };
   // NEW — see the dashboard's copy of this type for the full explanation.
   align?: "left" | "center" | "right";
@@ -136,6 +138,7 @@ export interface ChangelogEntry {
   title:   string;
   body:    string;
   type:    ChangelogType;
+  imageUrl?: string;
 }
 
 export interface LauncherSettings {

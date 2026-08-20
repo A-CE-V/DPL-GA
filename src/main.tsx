@@ -15,6 +15,11 @@ function App() {
   const [fromCache, setFromCache] = useState(false);
   const [versions,  setVersions]  = useState<GameVersion[]>([]);
 
+  // NOTE — TitleBar (custom drag/minimize/maximize/close for the rounded-
+  // window look) is pulled out for now while that feature gets debugged
+  // separately — see CHANGES.md. decorations:true is back in
+  // tauri.conf.json, so the native title bar handles all of that again;
+  // rendering TitleBar on top of it would show two.
   if (screen === "splash") {
     return (
       <SplashScreen
@@ -52,6 +57,7 @@ function App() {
           fromCache={fromCache}
           onOpenSettings={() => setScreen("settings")}
           onVersionsUpdate={setVersions}
+          onConfigUpdate={setConfig}
         />
       </div>
       <div style={{ display: screen === "settings" ? "contents" : "none" }}>
@@ -66,17 +72,6 @@ function App() {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// FIX — the actual white-screen cause.
-//
-// This file defined the App component but never mounted it into the DOM.
-// index.html loads this file directly as the entry module — with no
-// ReactDOM.createRoot(...).render(...) call anywhere in the codebase
-// (verified via a full search across the entire src/ directory), the
-// component was defined but literally never rendered. No error, no crash,
-// nothing to see in the console — the page just stays blank forever,
-// which matches exactly what you were seeing.
-// ═══════════════════════════════════════════════════════════════════════════
 const rootEl = document.getElementById("root");
 if (!rootEl) {
   throw new Error("Fatal: #root element not found in index.html");

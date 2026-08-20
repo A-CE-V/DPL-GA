@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  Play, Download, ChevronDown, X, Check,
+  Play, Download, ChevronDown, ChevronLeft, ChevronRight, X, Check,
   Globe, MessageCircle, Twitter, Github, Trash2, Settings, WifiOff,
-  ArrowUpCircle, Loader, ShieldCheck, RotateCcw, Sparkles, Wrench, AlertTriangle, FileText,
+  ArrowUpCircle, Loader, ShieldCheck, RotateCcw, Sparkles, Wrench, AlertTriangle, FileText, ExternalLink,
 } from "lucide-react";
 import { FaItchIo, FaYoutube } from "react-icons/fa";
 import { CachedImage } from "../components/CachedImage";
@@ -406,19 +406,157 @@ function ChangelogCard({ entry, expanded, onToggle, accent }: {
         <ChevronDown size={13} color="var(--text-muted)" style={{ transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
       </button>
       {expanded && (
-        entry.body?.trim() ? (
-          <p style={{
-            padding: "0 14px 14px 50px", fontSize: "var(--text-sm)", color: "var(--text-secondary)",
-            lineHeight: 1.75, whiteSpace: "pre-wrap",
-          }}>
-            {entry.body}
-          </p>
-        ) : (
-          <p style={{ padding: "0 14px 14px 50px", fontSize: "var(--text-xs)", color: "var(--text-muted)", fontStyle: "italic" }}>
-            No description provided for this entry.
-          </p>
-        )
+        <div style={{ padding: "0 14px 14px 50px" }}>
+          {/* NEW — image support, consistent with the dropdown-modal style */}
+          {entry.imageUrl && (
+            <div style={{ width: "100%", maxWidth: 280, aspectRatio: "16/9", borderRadius: 8, overflow: "hidden", marginBottom: 10, background: "var(--bg-elevated)" }}>
+              <CachedImage src={entry.imageUrl} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            </div>
+          )}
+          {entry.body?.trim() ? (
+            <p style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", lineHeight: 1.75, whiteSpace: "pre-wrap" }}>
+              {entry.body}
+            </p>
+          ) : (
+            <p style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", fontStyle: "italic" }}>
+              No description provided for this entry.
+            </p>
+          )}
+        </div>
       )}
+    </div>
+  );
+}
+
+// ─── Changelog "dropdown-modal" style variant ───────────────────────────────
+// Collapses the inline list into a single "Changelog History" trigger;
+// clicking it opens a modal listing every entry (with images), and
+// clicking an entry shows its full detail. If readMoreUrl is set and an
+// entry's description runs over 300 words, it's cut off with a fade and a
+// link there instead of showing the whole thing — left blank, entries
+// always show in full regardless of length.
+
+function truncateWords(text: string, limit: number): string {
+  const words = text.trim().split(/\s+/);
+  return words.length <= limit ? text : words.slice(0, limit).join(" ");
+}
+
+function ChangelogEntryDetail({ entry, accent, readMoreUrl }: { entry: ChangelogEntry; accent: string; readMoreUrl?: string }) {
+  const meta = CHANGELOG_TYPE_META[entry.type] ?? CHANGELOG_TYPE_META.other;
+  const body = entry.body ?? "";
+  const wordCount = body.trim() ? body.trim().split(/\s+/).length : 0;
+  const shouldTruncate = !!readMoreUrl && wordCount > 300;
+  const displayText = shouldTruncate ? truncateWords(body, 300) : body;
+
+  return (
+    <div>
+      {entry.imageUrl && (
+        <div style={{ width: "100%", aspectRatio: "16/9", borderRadius: 10, overflow: "hidden", marginBottom: 14, background: "var(--bg-surface)" }}>
+          <CachedImage src={entry.imageUrl} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <div style={{ width: 24, height: 24, borderRadius: 6, background: `${meta.color}16`, border: `1px solid ${meta.color}30`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <meta.Icon size={12} color={meta.color} />
+        </div>
+        <span style={{ fontSize: "var(--text-2xs)", padding: "3px 8px", borderRadius: 5, background: `${meta.color}18`, color: meta.color, fontFamily: "'DM Mono',monospace", fontWeight: 700, textTransform: "uppercase" }}>{meta.label}</span>
+      </div>
+      <p style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "var(--text-md)", color: "var(--text-primary)", marginBottom: 4 }}>{entry.title}</p>
+      <p style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", fontFamily: "'DM Mono',monospace", marginBottom: 16 }}>v{entry.version} · {entry.date}</p>
+      {body.trim() ? (
+        <>
+          <div style={{ position: "relative" }}>
+            <p style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", lineHeight: 1.75, whiteSpace: "pre-wrap" }}>
+              {displayText}{shouldTruncate ? "…" : ""}
+            </p>
+            {shouldTruncate && (
+              <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 56, background: "linear-gradient(to bottom, transparent, var(--bg-elevated))", pointerEvents: "none" }} />
+            )}
+          </div>
+          {shouldTruncate && (
+            <div style={{ textAlign: "center", marginTop: 12 }}>
+              <p style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", marginBottom: 8 }}>Want the full changelog?</p>
+              <a href={readMoreUrl} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 8, background: accent, color: "#000", fontFamily: "'Syne',sans-serif", fontWeight: 700, fontSize: "var(--text-xs)", textDecoration: "none" }}>
+                Read more <ExternalLink size={11} />
+              </a>
+            </div>
+          )}
+        </>
+      ) : (
+        <p style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", fontStyle: "italic" }}>No description provided for this entry.</p>
+      )}
+    </div>
+  );
+}
+
+function ChangelogHistoryModal({
+  entries, accent, readMoreUrl, onClose,
+}: {
+  entries: ChangelogEntry[]; accent: string; readMoreUrl?: string; onClose: () => void;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = entries.find(e => e.id === selectedId) ?? null;
+
+  return (
+    <Modal onClose={onClose} maxWidth={480}>
+      {selected ? (
+        <div>
+          <button onClick={() => setSelectedId(null)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "var(--text-xs)", fontFamily: "'DM Mono',monospace", marginBottom: 16, padding: 0 }}>
+            <ChevronLeft size={13} /> Back to list
+          </button>
+          <ChangelogEntryDetail entry={selected} accent={accent} readMoreUrl={readMoreUrl} />
+        </div>
+      ) : (
+        <>
+          <p style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "var(--text-md)", color: "var(--text-primary)", marginBottom: 16 }}>Changelog History</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: "60vh", overflowY: "auto" }}>
+            {entries.length === 0 && (
+              <p style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", textAlign: "center", padding: "20px 0" }}>No changelog entries yet.</p>
+            )}
+            {entries.map(e => {
+              const meta = CHANGELOG_TYPE_META[e.type] ?? CHANGELOG_TYPE_META.other;
+              return (
+                <button key={e.id} onClick={() => setSelectedId(e.id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: 10, borderRadius: 9, border: "1px solid var(--border)", background: "var(--bg-base)", cursor: "pointer", textAlign: "left" }}>
+                  {e.imageUrl ? (
+                    <div style={{ width: 44, height: 44, borderRadius: 7, overflow: "hidden", flexShrink: 0, background: "var(--bg-surface)" }}>
+                      <CachedImage src={e.imageUrl} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    </div>
+                  ) : (
+                    <div style={{ width: 44, height: 44, borderRadius: 7, flexShrink: 0, background: `${meta.color}16`, border: `1px solid ${meta.color}30`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <meta.Icon size={16} color={meta.color} />
+                    </div>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ fontSize: "var(--text-sm)", fontFamily: "'Syne',sans-serif", fontWeight: 700, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.title}</p>
+                    <p style={{ fontSize: "var(--text-2xs)", color: "var(--text-muted)", marginTop: 2 }}>v{e.version} · {e.date}</p>
+                  </div>
+                  <ChevronRight size={14} color="var(--text-faint)" style={{ flexShrink: 0 }} />
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function ChangelogDropdownTrigger({
+  comp, style, entries, accent, readMoreUrl,
+}: {
+  comp: CanvasComponent; style: React.CSSProperties; entries: ChangelogEntry[]; accent: string; readMoreUrl?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={style}>
+      <button
+        onClick={() => setOpen(true)}
+        style={{ width: "100%", height: "100%", borderRadius: 8, border: "1px solid var(--border)", background: "var(--bg-elevated)", color: "var(--text-secondary)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 14px", fontFamily: "'DM Mono',monospace", fontSize: Math.max(11, comp.h * 0.32) }}
+      >
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}><FileText size={14} /> Changelog History</span>
+        <ChevronDown size={13} />
+      </button>
+      {open && <ChangelogHistoryModal entries={entries} accent={accent} readMoreUrl={readMoreUrl} onClose={() => setOpen(false)} />}
     </div>
   );
 }
@@ -515,11 +653,16 @@ function LayoutCanvas(p: LayoutProps) {
         return fromCache ? <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center", justifyContent: justifyFor(comp) }}><div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", borderRadius: 99, background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.2)" }}><WifiOff size={9} color="#eab308" /><span style={{ fontSize: "var(--text-2xs)", color: "#eab308", fontFamily: "'DM Mono',monospace" }}>offline</span></div></div> : null;
       case "progress-bar":
         return latest && installing[latest.tag] ? <div key={comp.id} style={{ ...style, background: "var(--bg-surface)", borderRadius: 8, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", gap: 6 }}><div style={{ display: "flex", justifyContent: "flex-end" }}><button onClick={() => p.onCancel(latest.tag)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex" }}><X size={11} /></button></div><ProgressBar progress={installing[latest.tag]} accent={accent} /></div> : null;
-      case "changelog":
+      case "changelog": {
+        const changelogVariant = comp.styleConfig?.changelogVariant ?? "default";
+        if (changelogVariant === "dropdown-modal") {
+          return <ChangelogDropdownTrigger key={comp.id} comp={comp} style={style} entries={changelog} accent={accent} readMoreUrl={comp.styleConfig?.readMoreUrl} />;
+        }
         return <div key={comp.id} style={{ ...style, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
           {changelog.map(e => <ChangelogCard key={e.id} entry={e} expanded={expanded === e.id} onToggle={() => p.setExpanded(expanded === e.id ? null : e.id)} accent={accent} />)}
           {changelog.length === 0 && <p style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", textAlign: "center", padding: "16px 0" }}>No changelog entries yet.</p>}
         </div>;
+      }
       case "divider":
         return <div key={comp.id} style={style}><div style={{ width: "100%", height: 1, background: "var(--border)" }} /></div>;
       case "spacer":

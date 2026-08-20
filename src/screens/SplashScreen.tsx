@@ -21,7 +21,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { WifiOff, ShieldX, RefreshCw, Clock } from "lucide-react";
 import { checkIPBan, checkMACBan, getClientIP, fetchGameConfig } from "../lib/firebase";
-import { applyTheme, getTheme }                                  from "../lib/themes";
+import { applyProfileTheme } from "../lib/themes";
 import { loadConfigCache, cacheAge }                             from "../lib/cache";
 import { getMacAddress, isTauri }                                from "../lib/ipc";
 import { GAME_ID }                                               from "../lib/firebase";
@@ -108,8 +108,7 @@ export function SplashScreen({ onReady }: Props) {
   }, []);
 
   const proceedWithCache = useCallback((cached: NonNullable<Awaited<ReturnType<typeof loadConfigCache>>>) => {
-    const theme = getTheme(cached.config.profile?.themeId ?? "terminal");
-    applyTheme(theme);
+    applyProfileTheme(cached.config.profile);
     finishBoot(cached.config, true);
   }, [finishBoot]);
 
@@ -151,7 +150,7 @@ export function SplashScreen({ onReady }: Props) {
         return;
       }
 
-      applyTheme(getTheme(config.profile?.themeId ?? "terminal"));
+      applyProfileTheme(config.profile);
       finishBoot(config, false);
 
     } catch {
@@ -225,7 +224,7 @@ export function SplashScreen({ onReady }: Props) {
 }
 
 const FULL: React.CSSProperties = {
-  position: "fixed", inset: 0, zIndex: 9999,
+  height: "100%", width: "100%",
   display: "flex", alignItems: "center", justifyContent: "center",
 };
 const BTN_STYLE: React.CSSProperties = {
