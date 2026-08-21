@@ -63,16 +63,24 @@
   --sidebar-w: 220px;
   --topbar-h:  48px;
 
-  /* PAUSED — for the rounded custom window shape, currently reverted
-     (see CHANGES.md — decorations/transparent are back to true/false in
-     tauri.conf.json, TitleBar.tsx isn't rendered). Left defined, unused,
-     in case that feature gets re-attempted. */
+  /* Re-enabled — rounded custom window shape. See TitleBar.tsx and the
+     html/body/#root rule below. 12px approximates Windows 11's own native
+     undecorated-window rounding (see tauri.conf.json — shadow:true
+     triggers OS-level rounding there too on Windows 11 specifically);
+     tune this if the two don't quite line up visually on a real machine. */
   --window-radius:   12px;
   --titlebar-height: 34px;
 }
 
 *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
-html, body, #root { height:100%; overflow:hidden; background:var(--bg-base); }
+/* For the rounded custom window shape (tauri.conf.json: decorations:false,
+   transparent:true). html/body must be transparent so the four true
+   corners of the (still rectangular) OS window show through as
+   see-through rather than a solid color; #root carries the actual
+   background and clips its own content into the rounded rectangle via
+   border-radius + overflow:hidden. */
+html, body { height:100%; overflow:hidden; background:transparent; }
+#root       { height:100%; overflow:hidden; background:var(--bg-base); border-radius:var(--window-radius); }
 body {
   font-family:"DM Mono","Courier New",monospace;
   font-size:var(--text-sm);
