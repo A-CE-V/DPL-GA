@@ -636,10 +636,26 @@ function LayoutCanvas(p: LayoutProps) {
             activeIdx={p.mediaIdx} onActiveIdxChange={p.setMediaIdx}
           />
         </div>;
-      case "social-links":
-        return <div key={comp.id} style={{ ...style, display: "flex", alignItems: "center", justifyContent: justifyFor(comp), gap: 6, flexWrap: "wrap" }}>
-          {SOCIALS.map(({ key, url, Icon, label }) => <a key={key} href={url} target="_blank" rel="noopener noreferrer" title={label} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: Math.min(30, comp.h * 0.8), height: Math.min(30, comp.h * 0.8), borderRadius: 7, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: "var(--text-muted)", textDecoration: "none", transition: "all 0.12s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = `${accent}44`; e.currentTarget.style.color = accent; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}><Icon size={12} /></a>)}
+      case "social-links": {
+        // FIX — previously always rendered at the full comp.w regardless
+        // of how many platforms were actually configured, positioning a
+        // single icon via justify-content inside whatever (often larger)
+        // box the dev had dragged out — "a rectangle with a single icon
+        // floating" even with alignment set. Now sizes to the natural
+        // width needed for however many platforms are actually
+        // configured; comp.x/comp.w/align together only decide where
+        // that snug, auto-sized cluster anchors within the box the dev
+        // originally sized — not a container the content is forced to
+        // fill.
+        const iconSize = Math.min(30, comp.h * 0.8);
+        const naturalW = SOCIALS.length > 0 ? SOCIALS.length * iconSize + (SOCIALS.length - 1) * 6 : 0;
+        const anchorLeft = comp.align === "center" ? comp.x + (comp.w - naturalW) / 2
+          : comp.align === "right" ? comp.x + comp.w - naturalW
+          : comp.x;
+        return <div key={comp.id} style={{ position: "absolute", left: anchorLeft, top: comp.y, width: naturalW, height: comp.h, zIndex: comp.zIndex, display: "flex", alignItems: "center", gap: 6 }}>
+          {SOCIALS.map(({ key, url, Icon, label }) => <a key={key} href={url} target="_blank" rel="noopener noreferrer" title={label} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: iconSize, height: iconSize, flexShrink: 0, borderRadius: 7, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: "var(--text-muted)", textDecoration: "none", transition: "all 0.12s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = `${accent}44`; e.currentTarget.style.color = accent; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}><Icon size={12} /></a>)}
         </div>;
+      }
       case "settings-button":
         return <div key={comp.id} style={style}><button onClick={p.onSettings} style={{ width: "100%", height: "100%", borderRadius: 7, background: "var(--bg-elevated)", border: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.12s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = `${accent}44`; e.currentTarget.style.color = accent; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}><Settings size={Math.min(16, comp.w * 0.4)} /></button></div>;
       case "update-button":
@@ -676,10 +692,46 @@ function LayoutCanvas(p: LayoutProps) {
     }
   };
 
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+
+  // NEW — responsive canvas scaling. The canvas layout is authored at a
+  // fixed 900×600 design size (CANVAS_W/CANVAS_H above), but the actual
+  // available space varies — the window can be resized, and even at the
+  // default window size, the space below the custom titlebar is shorter
+  // than 600px. Previously this div was just width:100%,height:100%, so
+  // absolutely-positioned components kept their literal 900×600-space
+  // pixel coordinates regardless of how much space was actually
+  // available — components near the bottom edge would run past the real
+  // (shorter) container and get clipped by overflow:hidden, which is why
+  // the safe-margin clamping looked like it stopped working: the margin
+  // math was correct relative to a 600px-tall canvas that no longer
+  // matched reality. Measuring the real container and uniformly scaling a
+  // canvas that's always rendered at its true 900×600 size fixes both
+  // that and "the layout doesn't adapt when the window is resized" —
+  // letterboxed (centered, background-filled) on whichever axis doesn't
+  // match the 900:600 aspect ratio, rather than stretched/distorted.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => {
+      const { width, height } = el.getBoundingClientRect();
+      if (width > 0 && height > 0) {
+        setScale(Math.min(width / CANVAS_W, height / CANVAS_H));
+      }
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%", background: "var(--bg-base)", overflow: "hidden", fontFamily: "'DM Mono',monospace" }}>
-      {sorted.map(comp => renderComponent(comp))}
-      <TierWatermark profile={profile} settings={settings} />
+    <div ref={containerRef} style={{ width: "100%", height: "100%", background: "var(--bg-base)", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ position: "relative", width: CANVAS_W, height: CANVAS_H, flexShrink: 0, transform: `scale(${scale})`, transformOrigin: "center center", fontFamily: "'DM Mono',monospace" }}>
+        {sorted.map(comp => renderComponent(comp))}
+        <TierWatermark profile={profile} settings={settings} />
+      </div>
     </div>
   );
 }

@@ -1,3 +1,5 @@
+import { createPortal } from "react-dom";
+
 /**
  * Modal.tsx
  *
@@ -6,11 +8,22 @@
  *     just a dismissible banner at the top of the screen; this is the more
  *     prominent "window" treatment.
  *   - The download confirmation prompt (see HomeScreen.tsx handleDownload).
+ *   - The changelog "dropdown + modal" style's history/detail views.
  *
  * Click on the dark backdrop closes it (calls onClose) unless onClose is
  * omitted, in which case the modal can only be dismissed by an explicit
  * action inside it (used for cases where a stray click shouldn't lose
  * state, e.g. mid-download-confirmation with a checkbox already ticked).
+ *
+ * FIX — portals to document.body rather than rendering in place. The
+ * Canvas Editor's layout renders inside a CSS transform:scale() wrapper
+ * (for responsive resizing — see LayoutCanvas). A transform on any
+ * ancestor creates a new containing block for position:fixed descendants,
+ * so a modal triggered from something inside that scaled tree (the
+ * changelog dropdown's history modal, specifically) would otherwise be
+ * constrained to the canvas's own coordinate space — squished and
+ * mispositioned — instead of covering the real window. Portaling sidesteps
+ * this regardless of where a Modal gets triggered from, now or later.
  */
 export function Modal({
   children, onClose, maxWidth = 420,
@@ -19,7 +32,7 @@ export function Modal({
   onClose?:  () => void;
   maxWidth?: number;
 }) {
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed", inset: 0, zIndex: 999999,
@@ -41,6 +54,7 @@ export function Modal({
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
