@@ -2,15 +2,18 @@
  * MediaGallery.tsx
  *
  * Shared media display for both the Canvas Editor's media-carousel
- * component and the Classic layout's media section. Three layout modes,
+ * component and the Classic layout's media section. Four layout modes,
  * dev-configurable in the dashboard (profile.mediaDisplayMode):
  *
  *   - "carousel" (default): one image at a time, arrow buttons on both
  *     sides, dot indicators below.
  *   - "big-row":  one big image with the rest as a thumbnail row below it.
  *   - "big-left": same, but thumbnails stacked in a column on the left.
+ *   - "grid":     every image shown at once in a uniform grid — no
+ *     current/active image, so autoAdvance and the arrow/dot controls are
+ *     inert in this mode (nothing to advance between).
  *
- * All three support optional auto-advance (profile.mediaAutoAdvance +
+ * All other modes support optional auto-advance (profile.mediaAutoAdvance +
  * mediaAutoAdvanceSeconds) on top of the manual controls, never instead of
  * them.
  */
@@ -19,7 +22,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { CachedImage } from "./CachedImage";
 import type { GameMedia } from "../types";
 
-export type MediaDisplayMode = "carousel" | "big-row" | "big-left";
+export type MediaDisplayMode = "carousel" | "big-row" | "big-left" | "grid";
 
 function arrowStyle(side: "left" | "right"): React.CSSProperties {
   return {
@@ -81,6 +84,34 @@ export function MediaGallery({
       ))}
     </div>
   ) : null;
+
+  if (mode === "grid") {
+    // No single "current" image in this mode — every image is already
+    // visible, so there's nothing to advance between. Clicking one just
+    // gives it a light selected outline, purely cosmetic/consistent with
+    // the other modes' thumbnail highlighting; it doesn't change what's
+    // displayed since everything already is.
+    const cols = media.length <= 2 ? media.length : media.length <= 4 ? 2 : 3;
+    return (
+      <div style={{
+        display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 6,
+        width: "100%", height: "100%", overflowY: "auto", ...style,
+      }}>
+        {media.map((m, i) => (
+          <button
+            key={m.id}
+            onClick={() => onActiveIdxChange(i)}
+            style={{
+              ...THUMB_BTN, width: "100%", aspectRatio: "16/9",
+              border: i === safeIdx ? `2px solid ${accent}` : "2px solid transparent",
+            }}
+          >
+            <CachedImage src={m.url} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 4 }} />
+          </button>
+        ))}
+      </div>
+    );
+  }
 
   if (mode === "big-row") {
     return (

@@ -547,11 +547,20 @@ function ChangelogDropdownTrigger({
   comp: CanvasComponent; style: React.CSSProperties; entries: ChangelogEntry[]; accent: string; readMoreUrl?: string;
 }) {
   const [open, setOpen] = useState(false);
+  // FIX — this used to be width:"100%", height:"100%" with
+  // fontSize: comp.h * 0.32, so a changelog left at its default 220px
+  // height (sized for the list variant, before switching to this one)
+  // produced a ~70px font on what's supposed to be a single-line button.
+  // A trigger button has one sensible height regardless of how tall the
+  // box around it is — capped here and vertically centered within it,
+  // the same way a real button doesn't grow just because its container
+  // does.
+  const btnH = Math.min(comp.h, 40);
   return (
-    <div style={style}>
+    <div style={{ ...style, display: "flex", alignItems: "center" }}>
       <button
         onClick={() => setOpen(true)}
-        style={{ width: "100%", height: "100%", borderRadius: 8, border: "1px solid var(--border)", background: "var(--bg-elevated)", color: "var(--text-secondary)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 14px", fontFamily: "'DM Mono',monospace", fontSize: Math.max(11, comp.h * 0.32) }}
+        style={{ width: "100%", height: btnH, borderRadius: 8, border: "1px solid var(--border)", background: "var(--bg-elevated)", color: "var(--text-secondary)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 14px", fontFamily: "'DM Mono',monospace", fontSize: Math.max(11, btnH * 0.32) }}
       >
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}><FileText size={14} /> Changelog History</span>
         <ChevronDown size={13} />
@@ -572,6 +581,13 @@ interface LayoutProps {
   onDelete: (tag: string) => void; onLaunch: (tag?: string) => void;
   onSettings: () => void;
   setExpanded: (id: string | null) => void; setMediaIdx: (i: number) => void;
+  // NEW — the tag Launch should actually target: latest.tag normally,
+  // or an older installed version's tag when the player has "fallback to
+  // previous version on delete" on and latest itself isn't installed.
+  // undefined means nothing is launchable (must download). Computed once
+  // in HomeScreen rather than each layout re-deriving installed[latest.tag]
+  // itself, which is what caused this to need fixing in two places before.
+  launchableTag: string | undefined;
 }
 
 function TierWatermark({ profile, settings }: { profile: GameConfig["profile"]; settings: GameConfig["settings"] }) {
@@ -585,12 +601,12 @@ function TierWatermark({ profile, settings }: { profile: GameConfig["profile"]; 
 // CANVAS LAYOUT RENDERER
 // ════════════════════════════════════════════════════════════════════════════
 function LayoutCanvas(p: LayoutProps) {
-  const { config, fromCache, versions, media, changelog, installing, installed, running, launching, expanded, refreshing, refreshResult, onRefresh } = p;
+  const { config, fromCache, versions, media, changelog, installing, installed, running, launching, expanded, refreshing, refreshResult, onRefresh, launchableTag } = p;
   const { profile, settings, socials } = config;
   const accent  = profile.accentColor;
   const latest  = versions[0];
   const isRunning = !!(latest && running[latest.tag]);
-  const canLaunch = latest && installed[latest.tag] && !launching && !isRunning;
+  const canLaunch = !!launchableTag && !launching && !isRunning;
   const SOCIALS = buildSocials(socials);
   const CANVAS_W = 900, CANVAS_H = 600;
   const layout  = (profile.canvasLayout ?? []).map(c => clampToSafeArea(c, CANVAS_W, CANVAS_H));
@@ -619,7 +635,7 @@ function LayoutCanvas(p: LayoutProps) {
           <LaunchButtonComponent
             key={comp.id} comp={comp} style={style}
             latest={latest} dl={dl} canLaunch={!!canLaunch} isRunning={isRunning} launching={launching} accent={accent}
-            onLaunch={() => p.onLaunch()}
+            onLaunch={() => p.onLaunch(launchableTag)}
             onDownload={() => latest && p.onDownload(latest)}
             onCancel={() => latest && p.onCancel(latest.tag)}
             onRefresh={onRefresh}
@@ -740,12 +756,12 @@ function LayoutCanvas(p: LayoutProps) {
 // LAYOUT 1 — CLASSIC
 // ════════════════════════════════════════════════════════════════════════════
 function LayoutClassic(p: LayoutProps) {
-  const { config, fromCache, versions, changelog, media, installing, installed, running, launching, expanded, mediaIdx, refreshing, refreshResult, onRefresh } = p;
+  const { config, fromCache, versions, changelog, media, installing, installed, running, launching, expanded, mediaIdx, refreshing, refreshResult, onRefresh, launchableTag } = p;
   const { profile, settings, socials } = config;
   const accent = profile.accentColor;
   const latest = versions[0];
   const isRunning = !!(latest && running[latest.tag]);
-  const canLaunch = latest && installed[latest.tag] && !launching && !isRunning;
+  const canLaunch = !!launchableTag && !launching && !isRunning;
   const SOCIALS = buildSocials(socials);
   const [tab, setTab] = useState<"home" | "versions" | "changelog">("home");
 
@@ -796,7 +812,7 @@ function LayoutClassic(p: LayoutProps) {
               </div>
             ) : (
               <button
-                onClick={() => canLaunch ? p.onLaunch() : !isRunning && p.onDownload(latest)}
+                onClick={() => canLaunch ? p.onLaunch(launchableTag) : !isRunning && p.onDownload(latest)}
                 disabled={launching || isRunning}
                 style={{
                   height: 46, borderRadius: 10, border: "none",
@@ -906,9 +922,17 @@ interface Props {
   // theme/profile — App would keep handing the stale one back down on its
   // next re-render.
   onConfigUpdate?: (c: GameConfig) => void;
+  // NEW — FIX for the "Launch still shows after deleting your only
+  // version" bug. HomeScreen and SettingsScreen are both permanently
+  // mounted siblings now (see main.tsx's comment on why), each with their
+  // own local state — deleting a version from Settings' own delete button
+  // only ever updated Settings' own list, never told HomeScreen its
+  // `installed` map is now stale. Bumping this number is App.tsx's signal
+  // to re-run the real getInstalledVersion check below.
+  installedRefreshSignal?: number;
 }
 
-export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersionsUpdate, onConfigUpdate }: Props) {
+export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersionsUpdate, onConfigUpdate, installedRefreshSignal }: Props) {
   const { profile, settings } = config;
   const platform = getCurrentPlatform();
   const prefs    = loadPrefs();
@@ -936,6 +960,11 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersio
   // player last saw (persisted in localStorage — see the effect below), and
   // drives the modal that replaces the old dismiss-and-forget banner.
   const [gameUpdateNotice, setGameUpdateNotice] = useState<string | null>(null);
+  // NEW — see the comment on the installed-check effect below. The
+  // update-notice effect needs to know this has genuinely resolved at
+  // least once, not just read whatever `installed` defaults to before
+  // that async check finishes.
+  const [installedChecked, setInstalledChecked] = useState(false);
   // NEW — the version awaiting confirmation in the download modal, or null
   // when none is pending.
   const [pendingDownload, setPendingDownload]  = useState<GameVersion | null>(null);
@@ -974,13 +1003,20 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersio
   // this open" regardless of what triggered the fetch, without popping the
   // modal for a version the player has already been shown before.
   useEffect(() => {
-    if (!versions.length) return;
+    if (!versions.length || !installedChecked) return;
     const latestTag = versions[0].tag;
     const key = `deploy_last_seen_version_${GAME_ID}`;
     const lastSeen = localStorage.getItem(key);
-    if (lastSeen && lastSeen !== latestTag) setGameUpdateNotice(latestTag);
+    // FIX — this used to gate purely on "has this player opened the
+    // launcher before" (lastSeen being set at all), which a player who's
+    // opened it several times but never actually downloaded anything
+    // would also satisfy — they'd get an "update available" notice for a
+    // version they never had in the first place. Now gated on actually
+    // having something installed, matching what "update" should mean.
+    const hasAnyInstalled = Object.values(installed).some(Boolean);
+    if (hasAnyInstalled && lastSeen && lastSeen !== latestTag) setGameUpdateNotice(latestTag);
     localStorage.setItem(key, latestTag);
-  }, [versions]);
+  }, [versions, installed, installedChecked]);
 
   // NEW — auto-fetch, part 2: "after closing the game". Watches for a
   // tracked version's running state going true -> false (a session that
@@ -1003,9 +1039,10 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersio
   useEffect(() => { onVersionsUpdate?.(versions); }, [versions, onVersionsUpdate]);
   useEffect(() => { checkForLauncherUpdate().then(u => { if (u) setLauncherUpdate(u); }); }, []);
   useEffect(() => {
-    if (!isTauri() || !versions.length) return;
-    Promise.all(versions.map(v => getInstalledVersion(GAME_ID, v.tag).then(r => [v.tag, !!r] as const))).then(r => setInstalled(Object.fromEntries(r)));
-  }, [versions]);
+    if (!isTauri() || !versions.length) { setInstalledChecked(true); return; }
+    Promise.all(versions.map(v => getInstalledVersion(GAME_ID, v.tag).then(r => [v.tag, !!r] as const)))
+      .then(r => { setInstalled(Object.fromEntries(r)); setInstalledChecked(true); });
+  }, [versions, installedRefreshSignal]);
 
   // NEW — "Running" button state. Polls is_game_running (real process
   // tracking on the Rust side, not a guess) for every locally-installed
@@ -1185,6 +1222,17 @@ export function HomeScreen({ config, fromCache = false, onOpenSettings, onVersio
     onDelete: handleDelete, onLaunch: handleLaunch,
     onSettings: onOpenSettings,
     setExpanded, setMediaIdx,
+    // NEW — see the launchableTag comment on LayoutProps. Read fresh each
+    // render rather than cached in state: cheap (localStorage read), and
+    // this way a preference change in Settings takes effect on the very
+    // next render instead of needing a dedicated signal like
+    // installedRefreshSignal above.
+    launchableTag: (() => {
+      const latestTag = versions[0]?.tag;
+      if (latestTag && installed[latestTag]) return latestTag;
+      if (!loadPrefs().fallbackToPreviousOnDelete) return undefined;
+      return versions.find(v => v.tag !== latestTag && installed[v.tag])?.tag;
+    })(),
   };
 
   return (

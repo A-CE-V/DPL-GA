@@ -15,6 +15,10 @@ function App() {
   const [config,    setConfig]    = useState<GameConfig | null>(null);
   const [fromCache, setFromCache] = useState(false);
   const [versions,  setVersions]  = useState<GameVersion[]>([]);
+  // NEW — see the onVersionDeleted comment on SettingsScreen's Props for
+  // why this exists. Just a signal, not real data — HomeScreen only cares
+  // that it changed, not what the value is.
+  const [installedRefreshSignal, setInstalledRefreshSignal] = useState(0);
 
   // Re-enabled — the black screen turned out to be an unrelated JS import
   // error (see CHANGES.md), not this. TitleBar renders here, once, above
@@ -59,6 +63,7 @@ function App() {
                 onOpenSettings={() => setScreen("settings")}
                 onVersionsUpdate={setVersions}
                 onConfigUpdate={setConfig}
+                installedRefreshSignal={installedRefreshSignal}
               />
             </div>
             <div style={{ display: screen === "settings" ? "contents" : "none" }}>
@@ -67,6 +72,7 @@ function App() {
                 versions={versions}
                 fromCache={fromCache}
                 onBack={() => setScreen("home")}
+                onVersionDeleted={() => setInstalledRefreshSignal(n => n + 1)}
               />
             </div>
           </>

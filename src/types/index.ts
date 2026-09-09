@@ -82,7 +82,7 @@ export interface GameProfile {
   // stacked on the left. autoAdvance cycles through images on a timer
   // (mediaAutoAdvanceSeconds, default 5) in addition to manual arrows/dots
   // — it doesn't replace them.
-  mediaDisplayMode?:        "carousel" | "big-row" | "big-left";
+  mediaDisplayMode?:        "carousel" | "big-row" | "big-left" | "grid";
   mediaAutoAdvance?:        boolean;
   mediaAutoAdvanceSeconds?: number;
 }

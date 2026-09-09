@@ -223,8 +223,22 @@ export function SplashScreen({ onReady }: Props) {
   );
 }
 
+// FIX — this screen renders inside the flex area *below* TitleBar (see
+// main.tsx), not the full window — so centering "within 100% height" was
+// centering within (windowHeight - titlebarHeight), landing the content
+// about half the titlebar's height (~17px) below the window's true
+// center. TitleBar has to stay mounted here regardless (it's the only way
+// to drag/minimize/close the window, including during splash — see
+// main.tsx's comment), so instead of restructuring that, this
+// compensates directly: padding-bottom equal to the titlebar height with
+// border-box sizing shrinks the content area by exactly that amount,
+// which — for content vertically centered within it — always lands the
+// visual center at windowHeight/2 regardless of window size. Applied via
+// FULL since every screen in this file (StatusScreen, NeutralLoader, the
+// brand-reveal) spreads it in.
 const FULL: React.CSSProperties = {
-  height: "100%", width: "100%",
+  height: "100%", width: "100%", boxSizing: "border-box",
+  paddingBottom: "var(--titlebar-height)",
   display: "flex", alignItems: "center", justifyContent: "center",
 };
 const BTN_STYLE: React.CSSProperties = {

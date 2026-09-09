@@ -26,13 +26,20 @@ export interface PlayerPrefs {
   // NEW — "don't ask again" from the download confirmation modal (see
   // HomeScreen.tsx handleDownload).
   skipDownloadConfirm?: boolean;
+  // NEW — when the player deletes their currently-installed version
+  // locally (from this screen) while an older version is still installed,
+  // this lets the main Launch button fall back to launching that older
+  // version instead of immediately demanding a fresh download of latest.
+  // Off by default — deleting a version is otherwise a reasonably strong
+  // signal the player wants a clean slate.
+  fallbackToPreviousOnDelete?: boolean;
 }
 
 export function loadPrefs(): PlayerPrefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
-    return raw ? JSON.parse(raw) : { analyticsOptOut: false, disableAutoUpdate: false, skipDownloadConfirm: false };
-  } catch { return { analyticsOptOut: false, disableAutoUpdate: false, skipDownloadConfirm: false }; }
+    return raw ? JSON.parse(raw) : { analyticsOptOut: false, disableAutoUpdate: false, skipDownloadConfirm: false, fallbackToPreviousOnDelete: false };
+  } catch { return { analyticsOptOut: false, disableAutoUpdate: false, skipDownloadConfirm: false, fallbackToPreviousOnDelete: false }; }
 }
 
 export function savePrefs(prefs: PlayerPrefs): void {
@@ -79,8 +86,8 @@ function ToggleRow({
 
 // ─── Installed version row ─────────────────────────────────────────────────────
 function InstalledVersionRow({
-  version, accent, onDelete,
-}: { version: GameVersion; accent: string; onDelete: () => void }) {
+  version, accent, onDelete, onVersionDeleted,
+}: { version: GameVersion; accent: string; onDelete: () => void; onVersionDeleted?: () => void }) {
   const [info,     setInfo]     = useState<{ version: string; path: string; size_mb: number } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleted,  setDeleted]  = useState(false);
@@ -99,6 +106,7 @@ function InstalledVersionRow({
       await deleteVersion(GAME_ID, version.tag);
       setDeleted(true);
       onDelete();
+      onVersionDeleted?.();
     } catch (e) {
       console.error("[SettingsScreen] delete failed:", e);
     } finally {
@@ -183,9 +191,15 @@ interface Props {
   versions: GameVersion[];
   onBack:  () => void;
   fromCache?: boolean;
+  // NEW — FIX for "Launch still shows after deleting your only version".
+  // HomeScreen stays permanently mounted alongside this screen (see
+  // main.tsx) with its own `installed` map, which this screen's delete
+  // button never touched — it only ever updated this screen's own list.
+  // Calling this after a successful delete tells HomeScreen to re-check.
+  onVersionDeleted?: () => void;
 }
 
-export function SettingsScreen({ config, versions, onBack, fromCache = false }: Props) {
+export function SettingsScreen({ config, versions, onBack, fromCache = false, onVersionDeleted }: Props) {
   const { profile, settings } = config;
   const accent = profile.accentColor;
 
@@ -322,6 +336,14 @@ export function SettingsScreen({ config, versions, onBack, fromCache = false }: 
                 Auto-update cannot be disabled — the developer has locked this setting.
               </p>
             )}
+            <Divider />
+            <ToggleRow
+              label="Fallback to previous version on delete"
+              desc="If you delete your current version here while an older one is still installed, Launch will use that older version instead of asking you to download again."
+              checked={!!prefs.fallbackToPreviousOnDelete}
+              onChange={v => updatePref("fallbackToPreviousOnDelete", v)}
+              accent={accent}
+            />
           </Section>
 
           <Section title="Installed Versions" Icon={HardDrive} accent={accent}>
@@ -335,6 +357,7 @@ export function SettingsScreen({ config, versions, onBack, fromCache = false }: 
                     version={v}
                     accent={accent}
                     onDelete={() => setLocalVersions(prev => prev.filter(x => x.id !== v.id))}
+                    onVersionDeleted={onVersionDeleted}
                   />
                 ))}
               </div>
